@@ -1,4 +1,5 @@
 import pygame
+from inventory import InventoryGrid
 
 # Default tile size (pixels) — can be changed at runtime with set_tile_size()
 TILE_SIZE = 64
@@ -18,9 +19,10 @@ class Room:
     def __init__(self, doors=None, enemies=None):
         self.doors = doors if doors else []  # list of "U","D","L","R"
         self.enemies = enemies if enemies else []
-        # walls are computed dynamically from current doors so that
-        # modifying `self.doors` (via append or assignment) immediately
-        # affects collision checks. Access via the `walls` property below.
+        # loot boxes: list of (tx, ty, item_dict)
+        self.loot_boxes = []
+        # chests: list of InventoryGrid instances placed at tile coords
+        self.chests = []  # list of dicts: {'x':tx, 'y':ty, 'grid': InventoryGrid}
 
     def _generate_walls(self):
         walls = set()
@@ -92,3 +94,30 @@ class Room:
         for e in self.enemies:
             if e.alive:
                 e.draw(screen)
+
+        # Draw chests (wooden brown with darker border)
+        for c in self.chests:
+            bx, by = c['x'], c['y']
+            chest_w = TILE_SIZE * 2 // 3
+            chest_x = bx * TILE_SIZE + (TILE_SIZE - chest_w) // 2
+            chest_y = by * TILE_SIZE + (TILE_SIZE - chest_w) // 2
+            pygame.draw.rect(screen, (139, 69, 19), (chest_x, chest_y, chest_w, chest_w))  # saddle brown
+            pygame.draw.rect(screen, (100, 50, 20), (chest_x, chest_y, chest_w, chest_w), 2)
+
+    def pickup_loot_at(self, tx, ty):
+        """Remove and return item at tile coords tx,ty or None."""
+        for i, (bx, by, item) in enumerate(self.loot_boxes):
+            if bx == tx and by == ty:
+                return self.loot_boxes.pop(i)[2]
+        return None
+
+    def add_chest(self, tx, ty, grid_width=4, grid_height=3):
+        g = InventoryGrid(grid_width, grid_height)
+        self.chests.append({'x': tx, 'y': ty, 'grid': g})
+        return g
+
+    def get_chest_at(self, tx, ty):
+        for c in self.chests:
+            if c['x'] == tx and c['y'] == ty:
+                return c['grid']
+        return None

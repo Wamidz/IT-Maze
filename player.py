@@ -1,5 +1,6 @@
 import pygame
 import room
+from inventory import InventoryGrid
 
 class Player:
     def __init__(self):
@@ -9,6 +10,37 @@ class Player:
         self.offset_y = 0
         self.moving = False
         self.dir = (0, 0)
+        # Combat / inventory
+        self.max_hp = 100
+        self.hp = self.max_hp
+        # inventory grid (persistent left-side inventory) -- e.g. 6x3 layout
+        self.inventory = InventoryGrid(6, 3)
+
+    # Inventory / combat helpers
+    def heal(self, amount: int):
+        self.hp = min(self.max_hp, self.hp + int(amount))
+
+    def apply_damage(self, amount: int):
+        self.hp = max(0, self.hp - int(amount))
+
+    def add_item(self, item):
+        # append item to inventory
+        self.inventory.append(item)
+
+    def use_item(self, idx):
+        # basic use semantics: if in range, consume and apply effect if item is a dict
+        if idx < 0 or idx >= len(self.inventory):
+            return False
+        it = self.inventory.pop(idx)
+        try:
+            it_type = getattr(it, 'type', None) or it.get('type')
+            val = getattr(it, 'value', None) or it.get('value')
+        except Exception:
+            return True
+        if it_type == 'heal':
+            self.heal(val)
+        # other item types handled elsewhere
+        return True
 
     def _player_rect(self):
         size = room.TILE_SIZE

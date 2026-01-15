@@ -1,14 +1,61 @@
+# python
 import pygame, sys
 from player import Player
 from world import generate_maze_with_room_types
 import room
+import copy
 
 pygame.init()
-SCREEN_SIZE = room.get_screen_size()
-screen = pygame.display.set_mode((SCREEN_SIZE, SCREEN_SIZE))
+pygame.display.init()
+# Try to get desktop info reliably. On some platforms pygame.display.Info() returns zeros
+# until a window is created, so create a hidden window briefly if needed.
+info = pygame.display.Info()
+if info.current_w <= 0 or info.current_h <= 0:
+    # create a temporary hidden window to populate display info
+    tmp = pygame.display.set_mode((1, 1), pygame.HIDDEN)
+    info = pygame.display.Info()
+    # we can keep this tiny window until we call apply_graphics_options(), which will replace it
+
 pygame.display.set_caption("Inside the Network")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 32)
+
+# Fallback screen size (internal) until options are applied
+SCREEN_SIZE = room.get_screen_size()
+
+# Note: do not create a full window yet; apply_graphics_options() will set up the actual display and canvas.
+
+def build_resolutions(info):
+    # Wider set of common presets, plus desktop resolution
+    common = [
+        (640, 480), (800, 600), (1024, 768), (1152, 864),
+        (1280, 720), (1280, 800), (1360, 768), (1366, 768),
+        (1440, 900), (1536, 864), (1600, 900), (1680, 1050),
+        (1920, 1080), (1920, 1200), (2048, 1152), (2560, 1440), (3840, 2160)
+    ]
+    desktop = (info.current_w, info.current_h)
+    vals = []
+    # First, try platform-provided fullscreen modes list if available
+    try:
+        modes = pygame.display.list_modes()
+    except Exception:
+        modes = None
+
+    if modes and isinstance(modes, list) and len(modes) > 0:
+        # list_modes typically returns resolutions ordered from largest to smallest
+        for w, h in modes:
+            if w <= desktop[0] and h <= desktop[1]:
+                vals.append((w, h))
+    # fallback: include common presets that fit desktop
+    for w, h in common:
+        if w <= desktop[0] and h <= desktop[1]:
+            vals.append((w, h))
+    # ensure desktop resolution (use exact desktop size) is included and unique
+    if desktop not in vals:
+        vals.append(desktop)
+    # unique and sort by width then height
+    vals = sorted(list(dict.fromkeys(vals)), key=lambda x: (x[0], x[1]))
+    return vals
 
 # Game states
 STATE_TITLE = "title"
@@ -30,65 +77,247 @@ room_y = 0
 current_enemy = None
 selected = 0
 
-# Minimap config (scaled up a bit)
-MINIMAP_TILE = 20
+# World & minimap configuration
+WORLD_W = 21
+WORLD_H = 21
+
+# Minimap config (each room cell will show a ROOM_TILES x ROOM_TILES mini-grid)
+MINIMAP_TILE = 64
 MINIMAP_PADDING = 12
 minimap_discovered = set()  # (x,y) coords
 
-# Options storage
+# Minimap animation / state
+prev_minimap_center = (None, None)
+minimap_flash_timer = 0
+
+# Big map overlay state
+BIGMAP_BASE = 36  # base size (px) per room cell at zoom=1.0
+big_map_zoom = 1.0
+big_map_visible = False
+big_map_dragging = False
+big_map_pan_x = 0
+big_map_pan_y = 0
+big_map_last_mouse = (0, 0)
+big_map_just_opened = False
+
+# Inventory UI config
+INVENTORY_SLOTS = 6
+INVENTORY_SLOT_SIZE = 48
+# Chest / drag state
+chest_open = False
+chest_grid = None
+chest_owner_coords = (None, None)
+dragging_item = None  # dict of item being dragged
+drag_source = None  # 'player' or 'chest'
+drag_origin = None  # original (grid, x, y) for restore
+drag_mouse_offset = (0, 0)
+
+def clamp_big_map_pan():
+    global big_map_pan_x, big_map_pan_y
+    # Pan lock removed: intentionally do not clamp pan here so the user can freely drag the map.
+    # This function is kept for compatibility (calls from zoom etc.) but is currently a no-op.
+    return
+
+
+def recenter_big_map_on_player():
+    """Center the big map view on the player's exact sub-tile position."""
+    global big_map_pan_x, big_map_pan_y
+    try:
+        if canvas is None:
+            return
+        room_px = int(BIGMAP_BASE * big_map_zoom)
+        # normalized in-room position (tile center + offset)
+        in_x = (player.x + 0.5) + (player.offset_x / max(1, room.TILE_SIZE))
+        in_y = (player.y + 0.5) + (player.offset_y / max(1, room.TILE_SIZE))
+        sub_px_x = int((in_x / room.ROOM_TILES) * room_px)
+        sub_px_y = int((in_y / room.ROOM_TILES) * room_px)
+        prx_world = (room_x * room_px) + sub_px_x
+        pry_world = (room_y * room_px) + sub_px_y
+        cw, ch = canvas.get_size()
+        big_map_pan_x = cw // 2 - prx_world
+        big_map_pan_y = ch // 2 - pry_world
+    except Exception:
+        pass
+
+def start_new_world(width, height, difficulty_level):
+    global world, player, room_x, room_y, minimap_discovered, prev_minimap_center, minimap_flash_timer, WORLD_W, WORLD_H
+    WORLD_W, WORLD_H = width, height
+    world = generate_maze_with_room_types(width=width, height=height, difficulty=difficulty_level)
+    player = Player()
+    # spawn player roughly in center so minimap can show movement in all directions
+    room_x, room_y = width // 2, height // 2
+    minimap_discovered = set()
+    minimap_discovered.add((room_x, room_y))
+    prev_minimap_center = (room_x, room_y)
+    minimap_flash_timer = 12
+    return world
+
+# Options storage (resolutions will be populated after we query display)
 options = {
     "graphics": {
         "tile_size": room.TILE_SIZE,  # will store selected tile size
         "display_mode": "windowed",  # windowed | fullscreen | borderless
         "fit_to_screen": False,
+        "resolutions": [],
+        "resolution_index": 0,
     },
-    "controls": {
-        # placeholder for future keybindings
-    },
-    "audio": {
-        "volume": 1.0,
-    }
+    "controls": {},
+    "audio": {"volume": 1.0}
 }
+
+# internal render canvas will be created by apply_graphics_options() once the display mode is known
+canvas = None
+
+# Populate resolutions list based on current desktop
+options["graphics"]["resolutions"] = build_resolutions(info)
+
+def choose_default_16_9(res_list, info):
+    """Choose a default resolution that matches 16:9 if possible; fall back to desktop or largest."""
+    # prefer common 16:9 presets in ascending preference
+    preferred = [(1280,720), (1366,768), (1600,900), (1920,1080), (2560,1440), (3840,2160)]
+    for p in preferred:
+        if p in res_list:
+            return res_list.index(p)
+    # otherwise choose the desktop resolution if present
+    desktop = (info.current_w, info.current_h)
+    if desktop in res_list:
+        return res_list.index(desktop)
+    # otherwise pick the largest available (last in our sorted list)
+    return len(res_list) - 1
+
+# default index: prefer a 16:9 resolution when possible
+options["graphics"]["resolution_index"] = choose_default_16_9(options["graphics"]["resolutions"], info)
+
+# Pending UI-only graphics settings (changes here are not applied until the user clicks Apply)
+pending_graphics = copy.deepcopy(options["graphics"])
+graphics_dropdown_open = False
+graphics_dropdown_hover = -1
+
+def open_graphics_menu():
+    """Initialize the pending graphics state when opening the graphics menu."""
+    global pending_graphics, graphics_dropdown_open, graphics_dropdown_hover
+    pending_graphics = copy.deepcopy(options["graphics"])
+    graphics_dropdown_open = False
+    graphics_dropdown_hover = -1
+
+
+def get_canvas_mouse_pos():
+    """Map mouse position on the actual window to internal canvas coordinates."""
+    mx, my = pygame.mouse.get_pos()
+    sw, sh = screen.get_size()
+    cw, ch = canvas.get_size()
+    if sw == 0 or sh == 0:
+        return 0, 0
+    return int(mx * cw / sw), int(my * ch / sh)
+
+
+def menu_items_for_state(cur_state):
+    """Return list of (label_text, x, y) for clickable menu items for a given state.
+    Positions must match the drawn positions used by the renderer below.
+    """
+    items = []
+    if cur_state == STATE_TITLE:
+        items = [("New Game", 100, 150), ("Options", 100, 200), ("Exit", 100, 250)]
+    elif cur_state == STATE_DIFFICULTY:
+        items = [("Easy", 100, 150), ("Medium", 100, 200), ("Hard", 100, 250)]
+    elif cur_state == STATE_OPTIONS:
+        items = [("Graphics", 100, 150), ("Controls", 100, 200), ("Audio", 100, 250)]
+    elif cur_state == STATE_GRAPHICS:
+        # Use the pending_graphics values so UI changes don't immediately apply
+        dm = pending_graphics.get("display_mode", "windowed")
+        ridx = pending_graphics.get("resolution_index", 0)
+        res = pending_graphics.get("resolutions", options["graphics"]["resolutions"])  # fallback
+        if ridx < 0 or ridx >= len(res):
+            ridx = 0
+        res_text = f"{res[ridx][0]}x{res[ridx][1]}"
+        items = [
+            (f"Display Mode: {dm}", 100, 150),
+            (f"Resolution: {res_text}" + (" (disabled in fullscreen)" if dm == "fullscreen" else ""), 100, 200),
+            (f"Fit to screen: {'ON' if pending_graphics.get('fit_to_screen', False) else 'OFF'} (press F)", 100, 250),
+            ("Apply", 100, 300),
+            ("Cancel", 220, 300)
+        ]
+    elif cur_state == STATE_CONTROLS:
+        items = [("Back", 100, 250)]
+    elif cur_state == STATE_AUDIO:
+        items = [("Back", 100, 250)]
+    elif cur_state == STATE_PAUSE:
+        items = [("Title Screen", 100, 150), ("Exit", 100, 200)]
+    elif cur_state == STATE_QUESTION and current_enemy:
+        # click an answer (we'll list answers in vertical order)
+        for i, opt in enumerate(current_enemy.data["options"]):
+            items.append((opt, 60, 100 + i*40))
+    return items
+
+
+def rect_for_text_at(text, x, y):
+    w, h = font.size(text)
+    return pygame.Rect(x, y, w, h)
 
 
 def apply_graphics_options():
-    # Apply tile size change at runtime; if fit_to_screen is enabled, compute tile size
+    """
+    Sets pygame display mode and the internal canvas resolution. Behavior:
+    - fullscreen: display mode = desktop resolution; canvas = desktop resolution
+    - borderless: display mode = desktop resolution (NOFRAME); canvas = chosen internal resolution (can be lower -> pixelated)
+    - windowed: display mode = chosen resolution; canvas = chosen resolution
+    Tile size is computed from the canvas width and ROOM_TILES (unless fit_to_screen is True).
+    """
+    global SCREEN_SIZE, screen, canvas
+
     info = pygame.display.Info()
-    if options["graphics"].get("fit_to_screen", False):
-        # compute tile size to fit ROOM_TILES across the display
-        fs_w = max(16, info.current_w // room.ROOM_TILES)
-        fs_h = max(16, info.current_h // room.ROOM_TILES)
-        new_size = min(fs_w, fs_h)
-        options["graphics"]["tile_size"] = new_size
-    else:
-        desired = int(options["graphics"]["tile_size"])
-        max_tile_w = max(16, info.current_w // room.ROOM_TILES)
-        max_tile_h = max(16, info.current_h // room.ROOM_TILES)
-        max_tile = min(max_tile_w, max_tile_h)
-        new_size = min(desired, max_tile)
-        if new_size != desired:
-            # update stored value to the clamped value
-            options["graphics"]["tile_size"] = new_size
-
-    room.set_tile_size(new_size)
-
-    global SCREEN_SIZE, screen
-    SCREEN_SIZE = room.get_screen_size()
-
-    # Choose flags based on display mode
     mode = options["graphics"].get("display_mode", "windowed")
+    res_list = options["graphics"]["resolutions"]
+    idx = options["graphics"].get("resolution_index", 0)
+    idx = max(0, min(idx, len(res_list)-1))
+    options["graphics"]["resolution_index"] = idx
+    selected_res = res_list[idx]
+
     flags = 0
-    screen_size = (SCREEN_SIZE, SCREEN_SIZE)
+    display_w, display_h = SCREEN_SIZE, SCREEN_SIZE
+
     if mode == "fullscreen":
         flags = pygame.FULLSCREEN
-        # fullscreen uses desktop size; request desktop resolution
-        screen_size = (info.current_w, info.current_h)
-    elif mode == "borderless":
-        # borderless/windowed-fullscreen: set NOFRAME and match desktop size
-        flags = pygame.NOFRAME
-        screen_size = (info.current_w, info.current_h)
+        display_w, display_h = info.current_w, info.current_h
+        # internal canvas matches desktop resolution in fullscreen
+        canvas_w, canvas_h = display_w, display_h
 
-    screen = pygame.display.set_mode(screen_size, flags)
+    elif mode == "borderless":
+        # Borderless: make a window without frame that matches the desktop size
+        flags = pygame.NOFRAME
+        display_w, display_h = info.current_w, info.current_h
+        # internal canvas can be the selected (potentially lower) resolution so it will be scaled up
+        canvas_w, canvas_h = selected_res
+
+    else:  # windowed
+        display_w, display_h = selected_res
+        canvas_w, canvas_h = selected_res
+
+    # If fit_to_screen is enabled, compute tile size to fit ROOM_TILES across the canvas
+    if options["graphics"].get("fit_to_screen", False):
+        fs_w = max(8, canvas_w // room.ROOM_TILES)
+        fs_h = max(8, canvas_h // room.ROOM_TILES)
+        new_tile = min(fs_w, fs_h)
+        options["graphics"]["tile_size"] = new_tile
+    else:
+        # compute tile size from the internal canvas width (so the canvas resolution determines scaling)
+        desired = int(options["graphics"]["tile_size"])
+        canvas_tile_w = max(8, canvas_w // room.ROOM_TILES)
+        canvas_tile_h = max(8, canvas_h // room.ROOM_TILES)
+        max_tile = min(canvas_tile_w, canvas_tile_h)
+        new_tile = min(desired, max_tile)
+        if new_tile != desired:
+            options["graphics"]["tile_size"] = new_tile
+
+    # apply tile size to room
+    room.set_tile_size(options["graphics"]["tile_size"])
+
+    # recreate canvas with the internal resolution (canvas_w, canvas_h)
+    canvas = pygame.Surface((canvas_w, canvas_h))
+
+    # set up the actual display window/surface
+    SCREEN_SIZE = max(canvas_w, canvas_h)
+    screen = pygame.display.set_mode((display_w, display_h), flags)
 
     # reset offsets so entities align to the new tile grid
     try:
@@ -107,29 +336,150 @@ def apply_graphics_options():
 def draw_text(text, x, y, selected=False):
     color = (255, 255, 0) if selected else (200, 200, 200)
     t = font.render(text, True, color)
-    screen.blit(t, (x, y))
+    canvas.blit(t, (x, y))
+
 
 def draw_question(enemy):
-    screen.fill((0,0,0))
+    canvas.fill((0,0,0))
     q = font.render(enemy.data["q"], True, (255,255,255))
-    screen.blit(q, (40,40))
+    canvas.blit(q, (40,40))
     for i, opt in enumerate(enemy.data["options"]):
         draw_text(opt, 60, 100 + i*40, selected == i)
 
+
 def handle_keys():
     keys = pygame.key.get_pressed()
-    return {"up": keys[pygame.K_UP],
-            "down": keys[pygame.K_DOWN],
-            "left": keys[pygame.K_LEFT],
-            "right": keys[pygame.K_RIGHT]}
+    return {"up": keys[pygame.K_UP] or keys[pygame.K_w],
+            "down": keys[pygame.K_DOWN] or keys[pygame.K_s],
+            "left": keys[pygame.K_LEFT] or keys[pygame.K_a],
+            "right": keys[pygame.K_RIGHT] or keys[pygame.K_d]}
 
-# Helper to redraw background when in menus
 
 def draw_title_menu():
     draw_text("Inside the Network", 60, 50)
     draw_text("New Game", 100, 150, selected==0)
     draw_text("Options", 100, 200, selected==1)
     draw_text("Exit", 100, 250, selected==2)
+
+def inventory_panel_layout(cw, gy, gx):
+    """Return panel_x, panel_y, slot_size, slot_gap for player inventory area."""
+    panel_x = 10
+    panel_y = gy
+    panel_w = max(120, gx - 20)
+    # compute slot_size to fit horizontally if needed
+    cols = player.inventory.width
+    rows = player.inventory.height
+    slot_gap = 6
+    # ensure slots fit into panel_w
+    avail_w = panel_w - 16
+    slot_size = min(INVENTORY_SLOT_SIZE, max(16, (avail_w - (cols-1)*slot_gap)//cols))
+    return panel_x, panel_y, slot_size, slot_gap
+
+def draw_inventory_panel(cw, gy, gx):
+    """Draw player inventory grid in left gutter."""
+    panel_x, panel_y, slot_size, slot_gap = inventory_panel_layout(cw, gy, gx)
+    cols = player.inventory.width
+    rows = player.inventory.height
+    panel_w = max(120, gx - 20)
+    panel_h = max(120, 24 + rows * (slot_size + slot_gap))
+    # background
+    pygame.draw.rect(canvas, (20,20,30), (panel_x, panel_y, panel_w, panel_h))
+    pygame.draw.rect(canvas, (120,120,120), (panel_x, panel_y, panel_w, panel_h), 1)
+    # title and HP
+    t = font.render("Inventory", True, (200,200,200))
+    canvas.blit(t, (panel_x + 8, panel_y + 6))
+    hp_text = font.render(f"HP: {player.hp}/{player.max_hp}", True, (200,200,200))
+    canvas.blit(hp_text, (panel_x + 8, panel_y + 30))
+    # grid origin
+    sx = panel_x + 8
+    sy = panel_y + 56
+    # draw slots
+    for y in range(rows):
+        for x in range(cols):
+            rx = sx + x * (slot_size + slot_gap)
+            ry = sy + y * (slot_size + slot_gap)
+            pygame.draw.rect(canvas, (40,40,50), (rx, ry, slot_size, slot_size))
+            pygame.draw.rect(canvas, (100,100,100), (rx, ry, slot_size, slot_size), 1)
+    # draw items
+    for item, ix, iy, iw, ih in player.inventory.iter_items():
+        rx = sx + ix * (slot_size + slot_gap)
+        ry = sy + iy * (slot_size + slot_gap)
+        w_px = iw * slot_size + (iw-1) * slot_gap
+        h_px = ih * slot_size + (ih-1) * slot_gap
+        pygame.draw.rect(canvas, (180,160,60), (rx+2, ry+2, w_px-4, h_px-4))
+        name = item.get('name') if isinstance(item, dict) else getattr(item, 'name', str(item))
+        txt = font.render(name[:10], True, (20,20,20))
+        canvas.blit(txt, (rx+4, ry+4))
+
+def chest_modal_layout(cw, ch, grid):
+    cols = grid.width
+    rows = grid.height
+    slot_gap = 6
+    slot_size = min(64, INVENTORY_SLOT_SIZE)
+    modal_w = cols * slot_size + (cols-1)*slot_gap + 40
+    modal_h = rows * slot_size + (rows-1)*slot_gap + 80
+    mx = (cw - modal_w) // 2
+    my = (ch - modal_h) // 2
+    return mx, my, slot_size, slot_gap
+
+def draw_chest_modal(grid):
+    cw, ch = canvas.get_size()
+    mx, my, slot_size, slot_gap = chest_modal_layout(cw, ch, grid)
+    # modal background
+    pygame.draw.rect(canvas, (15,15,15), (mx, my, cw - mx*2, ch - my*2))
+    # header
+    title = font.render("Chest", True, (220,220,220))
+    canvas.blit(title, (mx + 16, my + 12))
+    sx = mx + 20
+    sy = my + 48
+    # draw slots
+    for y in range(grid.height):
+        for x in range(grid.width):
+            rx = sx + x * (slot_size + slot_gap)
+            ry = sy + y * (slot_size + slot_gap)
+            pygame.draw.rect(canvas, (40,40,50), (rx, ry, slot_size, slot_size))
+            pygame.draw.rect(canvas, (120,120,120), (rx, ry, slot_size, slot_size), 1)
+    # draw items
+    for item, ix, iy, iw, ih in grid.iter_items():
+        rx = sx + ix * (slot_size + slot_gap)
+        ry = sy + iy * (slot_size + slot_gap)
+        w_px = iw * slot_size + (iw-1) * slot_gap
+        h_px = ih * slot_size + (ih-1) * slot_gap
+        pygame.draw.rect(canvas, (160,120,180), (rx+2, ry+2, w_px-4, h_px-4))
+        name = item.get('name') if isinstance(item, dict) else getattr(item, 'name', str(item))
+        txt = font.render(name[:12], True, (20,20,20))
+        canvas.blit(txt, (rx+4, ry+4))
+    return (sx, sy, slot_size, slot_gap, mx, my)
+
+def screen_to_player_grid(mx, my, gx, gy):
+    panel_x, panel_y, slot_size, slot_gap = inventory_panel_layout(canvas.get_width(), gy, gx)
+    sx = panel_x + 8
+    sy = panel_y + 56
+    cols = player.inventory.width
+    rows = player.inventory.height
+    rx = mx - sx
+    ry = my - sy
+    if rx < 0 or ry < 0:
+        return None
+    cx = rx // (slot_size + slot_gap)
+    cy = ry // (slot_size + slot_gap)
+    if cx < 0 or cy < 0 or cx >= cols or cy >= rows:
+        return None
+    return int(cx), int(cy)
+
+def screen_to_chest_grid(mx, my, chest_sx, chest_sy, slot_size, slot_gap, grid):
+    rx = mx - chest_sx
+    ry = my - chest_sy
+    if rx < 0 or ry < 0:
+        return None
+    cx = rx // (slot_size + slot_gap)
+    cy = ry // (slot_size + slot_gap)
+    if cx < 0 or cy < 0 or cx >= grid.width or cy >= grid.height:
+        return None
+    return int(cx), int(cy)
+
+# ensure initial application of graphics options (setup canvas & screen)
+apply_graphics_options()
 
 # Start main loop
 while True:
@@ -138,6 +488,323 @@ while True:
             pygame.quit()
             sys.exit()
 
+        # Big map input handling: toggle with M, drag with left mouse
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_m:
+            big_map_visible = not big_map_visible
+            # mark that the map was just opened so we can optionally recenter once
+            big_map_just_opened = big_map_visible
+            # reset pan when opening
+            if big_map_visible:
+                # center on player's exact position (room index + sub-tile offset) if we have a canvas
+                if canvas:
+                    room_px = int(BIGMAP_BASE * big_map_zoom)
+                    # compute player's sub-pixel within its room
+                    in_x = (player.x + 0.5) + (player.offset_x / max(1, room.TILE_SIZE))
+                    in_y = (player.y + 0.5) + (player.offset_y / max(1, room.TILE_SIZE))
+                    sub_px_x = int((in_x / room.ROOM_TILES) * room_px)
+                    sub_px_y = int((in_y / room.ROOM_TILES) * room_px)
+                    # set pan so the player's exact marker sits at canvas center
+                    big_map_pan_x = canvas.get_width()//2 - (room_x * room_px + sub_px_x)
+                    big_map_pan_y = canvas.get_height()//2 - (room_y * room_px + sub_px_y)
+                    clamp_big_map_pan()
+                else:
+                    big_map_pan_x = -(room_x * BIGMAP_BASE)
+                    big_map_pan_y = -(room_y * BIGMAP_BASE)
+
+        if big_map_visible and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            # check recenter button (canvas-space)
+            mx, my = get_canvas_mouse_pos()
+            cw, ch = canvas.get_size()
+            rec_w, rec_h = 110, 30
+            rec_x = cw - rec_w - 10
+            rec_y = 10
+            recenter_button_rect = pygame.Rect(rec_x, rec_y, rec_w, rec_h)
+            if recenter_button_rect.collidepoint(mx, my):
+                # recenter map on player
+                recenter_big_map_on_player()
+            else:
+                # begin dragging big map (use canvas-space coords so scaling doesn't break dragging)
+                big_map_dragging = True
+                big_map_last_mouse = get_canvas_mouse_pos()
+
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            # finish drag/drop if active
+            if dragging_item is not None:
+                mx, my = get_canvas_mouse_pos()
+                # try drop into chest modal if open
+                if chest_open and chest_grid is not None:
+                    cmx, cmy, slot_size, slot_gap = chest_modal_layout(canvas.get_width(), canvas.get_height(), chest_grid)
+                    chest_sx = cmx + 20
+                    chest_sy = cmy + 48
+                    tgt = screen_to_chest_grid(mx, my, chest_sx, chest_sy, slot_size, slot_gap, chest_grid)
+                    if tgt:
+                        tx, ty = tgt
+                        success = chest_grid.place_item(dragging_item, tx, ty)
+                        if not success:
+                            # restore to origin
+                            orig_grid, ox, oy = drag_origin
+                            orig_grid.place_item(dragging_item, ox, oy)
+                        dragging_item = None
+                        drag_source = None
+                        drag_origin = None
+                        continue
+                # else try drop into player inventory at mouse
+                cw, ch = canvas.get_size()
+                gx = (cw - (room.ROOM_TILES * room.TILE_SIZE)) // 2
+                gy = (ch - (room.ROOM_TILES * room.TILE_SIZE)) // 2
+                pcell = screen_to_player_grid(mx, my, gx, gy)
+                if pcell:
+                    px, py = pcell
+                    placed = player.add_item_to_inventory(dragging_item, px, py)
+                    if not placed:
+                        # restore to origin
+                        orig_grid, ox, oy = drag_origin
+                        orig_grid.place_item(dragging_item, ox, oy)
+                else:
+                    # cannot place, restore
+                    orig_grid, ox, oy = drag_origin
+                    orig_grid.place_item(dragging_item, ox, oy)
+                dragging_item = None
+                drag_source = None
+                drag_origin = None
+            big_map_dragging = False
+
+        if big_map_dragging and event.type == pygame.MOUSEMOTION:
+            # use canvas-space mouse coordinates for consistent pan deltas
+            mx, my = get_canvas_mouse_pos()
+            lx, ly = big_map_last_mouse
+            dx = mx - lx
+            dy = my - ly
+            big_map_pan_x += dx
+            big_map_pan_y += dy
+            big_map_last_mouse = (mx, my)
+            clamp_big_map_pan()
+
+        # handle mouse wheel for zooming
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 4:  # scroll up
+            # zoom around mouse position
+            mx, my = get_canvas_mouse_pos()
+            old_room_px = int(BIGMAP_BASE * big_map_zoom)
+            new_zoom = min(3.0, big_map_zoom + 0.1)
+            new_room_px = int(BIGMAP_BASE * new_zoom)
+            if new_room_px != old_room_px:
+                ratio = new_room_px / max(1, old_room_px)
+                big_map_pan_x = mx - (mx - big_map_pan_x) * ratio
+                big_map_pan_y = my - (my - big_map_pan_y) * ratio
+                big_map_zoom = new_zoom
+                clamp_big_map_pan()
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 5:  # scroll down
+            mx, my = get_canvas_mouse_pos()
+            old_room_px = int(BIGMAP_BASE * big_map_zoom)
+            new_zoom = max(0.5, big_map_zoom - 0.1)
+            new_room_px = int(BIGMAP_BASE * new_zoom)
+            if new_room_px != old_room_px:
+                ratio = new_room_px / max(1, old_room_px)
+                big_map_pan_x = mx - (mx - big_map_pan_x) * ratio
+                big_map_pan_y = my - (my - big_map_pan_y) * ratio
+                big_map_zoom = new_zoom
+                clamp_big_map_pan()
+
+        # keyboard zoom in/out (plus/minus)
+        if event.type == pygame.KEYDOWN and big_map_visible:
+            if event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+                # zoom centered on canvas center
+                mx, my = canvas.get_width()//2, canvas.get_height()//2
+                old_room_px = int(BIGMAP_BASE * big_map_zoom)
+                new_zoom = min(3.0, big_map_zoom + 0.1)
+                new_room_px = int(BIGMAP_BASE * new_zoom)
+                if new_room_px != old_room_px:
+                    ratio = new_room_px / max(1, old_room_px)
+                    big_map_pan_x = mx - (mx - big_map_pan_x) * ratio
+                    big_map_pan_y = my - (my - big_map_pan_y) * ratio
+                    big_map_zoom = new_zoom
+                    clamp_big_map_pan()
+            elif event.key in (pygame.K_MINUS, pygame.K_UNDERSCORE, pygame.K_KP_MINUS):
+                mx, my = canvas.get_width()//2, canvas.get_height()//2
+                old_room_px = int(BIGMAP_BASE * big_map_zoom)
+                new_zoom = max(0.5, big_map_zoom - 0.1)
+                new_room_px = int(BIGMAP_BASE * new_zoom)
+                if new_room_px != old_room_px:
+                    ratio = new_room_px / max(1, old_room_px)
+                    big_map_pan_x = mx - (mx - big_map_pan_x) * ratio
+                    big_map_pan_y = my - (my - big_map_pan_y) * ratio
+                    big_map_zoom = new_zoom
+                    clamp_big_map_pan()
+
+        # MOUSE support: update selection on hover, activate on click
+        if event.type == pygame.MOUSEMOTION:
+            mx, my = get_canvas_mouse_pos()
+            # If dropdown is open in graphics menu, set hover for dropdown entries
+            if state == STATE_GRAPHICS and graphics_dropdown_open:
+                res_list = pending_graphics.get("resolutions", options["graphics"]["resolutions"])
+                rx, ry = 100, 200
+                h = font.get_linesize()
+                graphics_dropdown_hover = -1
+                for i, rsize in enumerate(res_list):
+                    rrect = pygame.Rect(rx, ry + (i + 1) * h, *font.size(f"{rsize[0]}x{rsize[1]}"))
+                    if rrect.collidepoint(mx, my):
+                        graphics_dropdown_hover = i
+                        selected = 1
+                        break
+            else:
+                items = menu_items_for_state(state)
+                for i, (label, x, y) in enumerate(items):
+                    r = rect_for_text_at(label, x, y)
+                    if r.collidepoint(mx, my):
+                        selected = i
+                        break
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            # left click acts like pressing Enter / interacting with menus
+            mx, my = get_canvas_mouse_pos()
+            # If we're in the overworld and not viewing the big map, check inventory clicks first
+            if state == STATE_OVERWORLD and not big_map_visible:
+                # compute game surface placement to derive left gutter area
+                tsize = room.TILE_SIZE
+                game_w = room.ROOM_TILES * tsize
+                game_h = room.ROOM_TILES * tsize
+                cw, ch = canvas.get_size()
+                gx = (cw - game_w) // 2
+                gy = (ch - game_h) // 2
+                # if the left gutter exists, let inventory handle clicks
+                if gx > 40:
+                    # check player inventory grid click for drag start
+                    pg = screen_to_player_grid(mx, my, gx, gy)
+                    if pg:
+                        px, py = pg
+                        entry = player.inventory.get_at(px, py)
+                        if entry:
+                            # remove and begin drag
+                            dragging_item = player.remove_item_from_inventory_at(px, py)
+                            drag_source = 'player'
+                            drag_origin = (player.inventory, px, py)
+                            drag_mouse_offset = (mx, my)
+                            continue
+                    used = handle_inventory_click(mx, my, gx, gy)
+                    if used:
+                        continue
+
+                # check chest interaction (E opens chests; mouse can click chest to open if present)
+                room_obj = world[(room_x, room_y)]
+                # compute mouse relative to in-room pixels
+                # derive top-left of room draw (gx, gy) and tile size
+                size = room.TILE_SIZE
+                rel_x = mx - gx
+                rel_y = my - gy
+                if rel_x >=0 and rel_y >=0 and rel_x < game_w and rel_y < game_h:
+                    tx = int(rel_x // size)
+                    ty = int(rel_y // size)
+                    chest = room_obj.get_chest_at(tx, ty)
+                    if chest:
+                        # open chest modal
+                        chest_open = True
+                        chest_grid = chest
+                        chest_owner_coords = (tx, ty)
+                        continue
+                # if chest modal already open, also check clicks inside it to start dragging
+                if chest_open and chest_grid is not None:
+                    # compute chest modal layout (no draw)
+                    cw2, ch2 = canvas.get_size()
+                    cmx, cmy, cslot, cgap = chest_modal_layout(cw2, ch2, chest_grid)
+                    chest_sx = cmx + 20
+                    chest_sy = cmy + 48
+                    cell = screen_to_chest_grid(mx, my, chest_sx, chest_sy, cslot, cgap, chest_grid)
+                    if cell:
+                        cx, cy = cell
+                        ent = chest_grid.get_at(cx, cy)
+                        if ent:
+                            # remove and begin drag
+                            dragging_item = chest_grid.remove_at(cx, cy)
+                            drag_source = 'chest'
+                            drag_origin = (chest_grid, cx, cy)
+                            drag_mouse_offset = (mx, my)
+                            continue
+
+            items = menu_items_for_state(state)
+            for i, (label, x, y) in enumerate(items):
+                r = rect_for_text_at(label, x, y)
+                if r.collidepoint(mx, my):
+                    selected = i
+                    # emulate pressing RETURN or performing an action
+                    if state == STATE_TITLE:
+                        if selected == 0:
+                            state = STATE_DIFFICULTY
+                            selected = 0
+                        elif selected == 1:
+                            state = STATE_OPTIONS
+                            selected = 0
+                        else:
+                            pygame.quit()
+                            sys.exit()
+                    elif state == STATE_DIFFICULTY:
+                        difficulty = selected + 1
+                        start_new_world(WORLD_W, WORLD_H, difficulty)
+                        state = STATE_OVERWORLD
+                    elif state == STATE_OPTIONS:
+                        if selected == 0:
+                            state = STATE_GRAPHICS
+                            selected = 0
+                            open_graphics_menu()
+                        elif selected == 1:
+                            state = STATE_CONTROLS
+                            selected = 0
+                        else:
+                            state = STATE_AUDIO
+                            selected = 0
+                    elif state == STATE_GRAPHICS:
+                        # entries: 0=Display Mode, 1=Resolution, 2=Fit To Screen, 3=Apply, 4=Cancel
+                        if selected == 0:
+                            modes = ["windowed", "fullscreen", "borderless"]
+                            cur = pending_graphics.get("display_mode", "windowed")
+                            idxm = modes.index(cur)
+                            pending_graphics["display_mode"] = modes[(idxm + 1) % len(modes)]
+                            # if switching to fullscreen, close dropdown and ensure desktop res selected in pending
+                            if pending_graphics["display_mode"] == "fullscreen":
+                                graphics_dropdown_open = False
+                                # ensure pending resolution index points at desktop if available
+                                desktop = (info.current_w, info.current_h)
+                                res_list = pending_graphics.get("resolutions", options["graphics"]["resolutions"])
+                                if desktop in res_list:
+                                    pending_graphics["resolution_index"] = res_list.index(desktop)
+                        elif selected == 1:
+                            # toggle the dropdown (only if not fullscreen)
+                            if pending_graphics.get("display_mode") != "fullscreen":
+                                graphics_dropdown_open = not graphics_dropdown_open
+                            else:
+                                graphics_dropdown_open = False
+                        elif selected == 2:
+                            pending_graphics["fit_to_screen"] = not pending_graphics.get("fit_to_screen", False)
+                        elif selected == 3:
+                            # Apply: commit pending_graphics into options and apply
+                            options["graphics"] = copy.deepcopy(pending_graphics)
+                            apply_graphics_options()
+                            state = STATE_OPTIONS
+                            selected = 0
+                        elif selected == 4:
+                            # Cancel: discard changes
+                            state = STATE_OPTIONS
+                            selected = 0
+                    elif state == STATE_CONTROLS:
+                        state = STATE_OPTIONS
+                        selected = 1
+                    elif state == STATE_AUDIO:
+                        state = STATE_OPTIONS
+                        selected = 2
+                    elif state == STATE_QUESTION and current_enemy:
+                        if selected == current_enemy.data["correct"]:
+                            current_enemy.alive = False
+                            minimap_discovered.add((room_x, room_y))
+                        state = STATE_OVERWORLD
+                    elif state == STATE_PAUSE:
+                        if selected == 0:
+                            state = STATE_TITLE
+                            selected = 0
+                        else:
+                            pygame.quit()
+                            sys.exit()
+                    break  # handled click
+
+        # KEYBOARD handling (existing behavior)
         # TITLE
         if state == STATE_TITLE and event.type == pygame.KEYDOWN:
             if event.key == pygame.K_UP:
@@ -163,11 +830,7 @@ while True:
                 selected = (selected + 1) % 3
             elif event.key == pygame.K_RETURN:
                 difficulty = selected + 1
-                world = generate_maze_with_room_types(width=3, height=3, difficulty=difficulty)
-                player = Player()
-                room_x, room_y = 0, 0
-                # Reset minimap discoveries
-                minimap_discovered = set()
+                start_new_world(WORLD_W, WORLD_H, difficulty)
                 state = STATE_OVERWORLD
             elif event.key == pygame.K_ESCAPE:
                 state = STATE_TITLE
@@ -183,6 +846,7 @@ while True:
                 if selected == 0:
                     state = STATE_GRAPHICS
                     selected = 0
+                    open_graphics_menu()
                 elif selected == 1:
                     state = STATE_CONTROLS
                     selected = 0
@@ -193,39 +857,80 @@ while True:
                 state = STATE_TITLE
                 selected = 0
 
-        # GRAPHICS submenu
+        # GRAPHICS submenu (enhanced) - now edits pending_graphics until Apply
         elif state == STATE_GRAPHICS and event.type == pygame.KEYDOWN:
+            # menu entries: 0=Display Mode, 1=Resolution, 2=Fit To Screen, 3=Apply, 4=Cancel
+            entry_count = 5
             if event.key == pygame.K_UP:
-                selected = (selected - 1) % 3
+                selected = (selected - 1) % entry_count
+                graphics_dropdown_open = False
             elif event.key == pygame.K_DOWN:
-                selected = (selected + 1) % 3
+                selected = (selected + 1) % entry_count
+                graphics_dropdown_open = False
             elif event.key == pygame.K_LEFT:
-                # cycle display mode left
-                modes = ["windowed", "fullscreen", "borderless"]
-                cur = options["graphics"].get("display_mode", "windowed")
-                idx = modes.index(cur)
-                options["graphics"]["display_mode"] = modes[(idx - 1) % len(modes)]
-                # apply immediately when user changes display mode
-                apply_graphics_options()
+                if selected == 0:
+                    modes = ["windowed", "fullscreen", "borderless"]
+                    cur = pending_graphics.get("display_mode", "windowed")
+                    idxm = modes.index(cur)
+                    pending_graphics["display_mode"] = modes[(idxm - 1) % len(modes)]
+                    if pending_graphics["display_mode"] == "fullscreen":
+                        graphics_dropdown_open = False
+                elif selected == 1:
+                    # cycle pending resolution left (UI only)
+                    if not pending_graphics.get("display_mode") == "fullscreen":
+                        ridx = pending_graphics.get("resolution_index", 0)
+                        ridx = (ridx - 1) % len(pending_graphics.get("resolutions", []))
+                        pending_graphics["resolution_index"] = ridx
+                elif selected == 2:
+                    pending_graphics["fit_to_screen"] = not pending_graphics.get("fit_to_screen", False)
             elif event.key == pygame.K_RIGHT:
-                # cycle display mode right
-                modes = ["windowed", "fullscreen", "borderless"]
-                cur = options["graphics"].get("display_mode", "windowed")
-                idx = modes.index(cur)
-                options["graphics"]["display_mode"] = modes[(idx + 1) % len(modes)]
-                apply_graphics_options()
+                if selected == 0:
+                    modes = ["windowed", "fullscreen", "borderless"]
+                    cur = pending_graphics.get("display_mode", "windowed")
+                    idxm = modes.index(cur)
+                    pending_graphics["display_mode"] = modes[(idxm + 1) % len(modes)]
+                    if pending_graphics["display_mode"] == "fullscreen":
+                        graphics_dropdown_open = False
+                elif selected == 1:
+                    if not pending_graphics.get("display_mode") == "fullscreen":
+                        ridx = pending_graphics.get("resolution_index", 0)
+                        ridx = (ridx + 1) % len(pending_graphics.get("resolutions", []))
+                        pending_graphics["resolution_index"] = ridx
+                elif selected == 2:
+                    pending_graphics["fit_to_screen"] = not pending_graphics.get("fit_to_screen", False)
             elif event.key == pygame.K_f:
-                # toggle fit-to-screen mode
-                options["graphics"]["fit_to_screen"] = not options["graphics"].get("fit_to_screen", False)
-                apply_graphics_options()
+                # toggle fit-to-screen
+                pending_graphics["fit_to_screen"] = not pending_graphics.get("fit_to_screen", False)
             elif event.key == pygame.K_RETURN:
-                # Map selected to tile sizes small/medium/large
-                tile_options = [48, 64, 96]
-                options["graphics"]["tile_size"] = tile_options[selected]
-                apply_graphics_options()
+                if selected == 3:
+                    # Apply
+                    options["graphics"] = copy.deepcopy(pending_graphics)
+                    apply_graphics_options()
+                    state = STATE_OPTIONS
+                    selected = 0
+                elif selected == 4:
+                    # Cancel
+                    state = STATE_OPTIONS
+                    selected = 0
+                else:
+                    # other entries: toggle or open dropdown
+                    if selected == 0:
+                        modes = ["windowed", "fullscreen", "borderless"]
+                        cur = pending_graphics.get("display_mode", "windowed")
+                        idxm = modes.index(cur)
+                        pending_graphics["display_mode"] = modes[(idxm + 1) % len(modes)]
+                        if pending_graphics["display_mode"] == "fullscreen":
+                            graphics_dropdown_open = False
+                    elif selected == 1:
+                        if pending_graphics.get("display_mode") != "fullscreen":
+                            graphics_dropdown_open = not graphics_dropdown_open
+                    elif selected == 2:
+                        pending_graphics["fit_to_screen"] = not pending_graphics.get("fit_to_screen", False)
             elif event.key == pygame.K_ESCAPE:
+                # Cancel changes
                 state = STATE_OPTIONS
                 selected = 0
+                graphics_dropdown_open = False
 
         # CONTROLS submenu
         elif state == STATE_CONTROLS and event.type == pygame.KEYDOWN:
@@ -248,7 +953,6 @@ while True:
             elif event.key == pygame.K_RETURN:
                 if selected == current_enemy.data["correct"]:
                     current_enemy.alive = False
-                    # Reveal this room when an enemy in it is defeated
                     minimap_discovered.add((room_x, room_y))
                 state = STATE_OVERWORLD
 
@@ -256,6 +960,26 @@ while True:
         elif state == STATE_OVERWORLD and event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 state = STATE_PAUSE
+            elif event.key == pygame.K_e:
+                # toggle chest open/close near player
+                room_obj = world[(room_x, room_y)]
+                if chest_open:
+                    chest_open = False
+                    chest_grid = None
+                    chest_owner_coords = (None, None)
+                else:
+                    # check current tile and adjacent tiles for chest
+                    found = None
+                    for dx, dy in [(0,0),(0,-1),(0,1),(-1,0),(1,0)]:
+                        tx = player.x + dx
+                        ty = player.y + dy
+                        c = room_obj.get_chest_at(tx, ty)
+                        if c:
+                            found = (c, (tx, ty))
+                            break
+                    if found:
+                        chest_grid, chest_owner_coords = found[0], found[1]
+                        chest_open = True
 
         # PAUSE
         elif state == STATE_PAUSE and event.type == pygame.KEYDOWN:
@@ -272,7 +996,9 @@ while True:
                 state = STATE_OVERWORLD
 
     keys = handle_keys()
-    screen.fill((0,0,0))
+
+    # draw to internal canvas
+    canvas.fill((0,0,0))
 
     # DRAW
     if state == STATE_TITLE:
@@ -292,46 +1018,119 @@ while True:
 
     elif state == STATE_GRAPHICS:
         draw_text("Graphics Options", 60, 50)
-        # Show current selection for tile sizes
-        ts = options["graphics"]["tile_size"]
-        dm = options["graphics"].get("display_mode", "windowed")
-        ft = options["graphics"].get("fit_to_screen", False)
-        draw_text("Small (48)", 100, 150, selected==0)
-        draw_text("Medium (64)", 100, 200, selected==1)
-        draw_text("Large (96)", 100, 250, selected==2)
-        draw_text(f"Current tilesize: {ts}", 300, 150)
-        draw_text(f"Display mode: {dm}", 300, 200)
-        draw_text(f"Fit to screen: {'ON' if ft else 'OFF'} (press F)", 300, 240)
+        ts = pending_graphics.get("tile_size", options["graphics"].get("tile_size"))
+        dm = pending_graphics.get("display_mode", "windowed")
+        ft = pending_graphics.get("fit_to_screen", False)
+        ridx = pending_graphics.get("resolution_index", 0)
+        res_list = pending_graphics.get("resolutions", options["graphics"]["resolutions"])
+        if ridx < 0 or ridx >= len(res_list):
+            ridx = 0
+            pending_graphics["resolution_index"] = 0
+        res_text = f"{res_list[ridx][0]}x{res_list[ridx][1]}"
+
+        draw_text(f"Display Mode: {dm}", 100, 150, selected==0)
+        if dm == "fullscreen":
+            draw_text(f"Resolution: {res_text} (disabled in fullscreen)", 100, 200, selected==1)
+        else:
+            draw_text(f"Resolution: {res_text}", 100, 200, selected==1)
+        draw_text(f"Fit to screen: {'ON' if ft else 'OFF'} (press F)", 100, 250, selected==2)
+        draw_text("Apply", 100, 300, selected==3)
+        draw_text("Cancel", 220, 300, selected==4)
+        draw_text(f"Current tilesize: {ts}", 400, 150)
+
+        # Draw resolution dropdown if open
+        if graphics_dropdown_open and dm != "fullscreen":
+            rx, ry = 100, 200
+            h = font.get_linesize()
+            for i, rsize in enumerate(res_list):
+                label = f"{rsize[0]}x{rsize[1]}"
+                is_selected = (i == pending_graphics.get("resolution_index", 0))
+                is_hover = (i == graphics_dropdown_hover)
+                col = (255,255,0) if is_selected or is_hover else (200,200,200)
+                t = font.render(label, True, col)
+                canvas.blit(t, (rx, ry + (i+1)*h))
 
     elif state == STATE_CONTROLS:
         draw_text("Controls", 60, 50)
         draw_text("Arrow keys to move", 100, 150)
         draw_text("Esc to pause/open menus", 100, 200)
+        draw_text("Back", 100, 250, selected==0)
 
     elif state == STATE_AUDIO:
         draw_text("Audio", 60, 50)
         draw_text(f"Volume: {options['audio']['volume']}", 100, 150)
+        draw_text("Back", 100, 250, selected==0)
 
     elif state == STATE_OVERWORLD:
         room_obj = world[(room_x, room_y)]
         # Reveal this room when entered
         minimap_discovered.add((room_x, room_y))
 
-        player.update(keys, room_obj)
-        # Update enemies, passing others so they don't overlap
-        for i, e in enumerate(room_obj.enemies):
-            others = room_obj.enemies[:i] + room_obj.enemies[i+1:]
-            e.update(player, room_obj, others=others)
+        # If the big map is open, pause world updates so gameplay doesn't move behind the map
+        if not big_map_visible:
+            player.update(keys, room_obj)
+            # Update enemies, passing others so they don't overlap
+            for i, e in enumerate(room_obj.enemies):
+                others = room_obj.enemies[:i] + room_obj.enemies[i+1:]
+                e.update(player, room_obj, others=others)
 
-        # Enemy collision
-        for e in room_obj.enemies:
-            if e.alive and e.x == player.x and e.y == player.y:
-                current_enemy = e
-                selected = 0
-                state = STATE_QUESTION
+            # Enemy collision (only when not viewing big map)
+            for e in room_obj.enemies:
+                if e.alive and e.x == player.x and e.y == player.y:
+                    current_enemy = e
+                    selected = 0
+                    state = STATE_QUESTION
 
-        room_obj.draw(screen)
-        player.draw(screen)
+         # draw room and player onto a centered game surface then blit into the canvas
+        # compute game area size from current tile size
+        tsize = room.TILE_SIZE
+        game_w = room.ROOM_TILES * tsize
+        game_h = room.ROOM_TILES * tsize
+        # ensure game fits into canvas; if not, scale down by adjusting tsize temporarily
+        cw, ch = canvas.get_size()
+        if game_w > cw or game_h > ch:
+            # compute scale factor to fit into canvas (preserve aspect)
+            sx = cw / game_w
+            sy = ch / game_h
+            s = min(sx, sy)
+            # compute new temporary tile size
+            temp_t = max(1, int(tsize * s))
+            game_w = room.ROOM_TILES * temp_t
+            game_h = room.ROOM_TILES * temp_t
+            temp_surface = pygame.Surface((game_w, game_h))
+            # draw into temp surface by temporarily setting TILE_SIZE
+            old_tile = room.TILE_SIZE
+            room.set_tile_size(temp_t)
+            room_obj.draw(temp_surface)
+            # draw player and enemies onto temp surface
+            player.draw(temp_surface)
+            room.set_tile_size(old_tile)
+        else:
+            temp_surface = pygame.Surface((game_w, game_h))
+            # normal draw at current tile size
+            room_obj.draw(temp_surface)
+            player.draw(temp_surface)
+
+
+        # center the game surface horizontally on the canvas leaving gutters left and right
+        # enforce a minimum horizontal gutter percentage so there's always 'open' space at left and right
+        min_gutter_ratio = 0.06  # 6% each side by default
+        min_gutter = int(cw * min_gutter_ratio)
+        gx = (cw - game_w) // 2
+        gy = (ch - game_h) // 2
+        if gx < min_gutter:
+            # need to shrink the game surface to guarantee gutters
+            target_game_w = max(32, cw - 2 * min_gutter)
+            # scale factor
+            s = target_game_w / game_w
+            target_game_h = max(32, int(game_h * s))
+            # create scaled version of temp_surface
+            scaled_game = pygame.transform.smoothscale(temp_surface, (target_game_w, target_game_h))
+            gx = (cw - target_game_w) // 2
+            gy = (ch - target_game_h) // 2
+            canvas.blit(scaled_game, (gx, gy))
+        else:
+            canvas.blit(temp_surface, (gx, gy))
 
         # ROOM TRANSITIONS (door must exist)
         size = room.ROOM_TILES
@@ -360,65 +1159,288 @@ while True:
             else:
                 player.y = size-1
 
-        # Draw minimap (top-right)
-        map_w = 3 * MINIMAP_TILE
-        map_h = 3 * MINIMAP_TILE
-        map_x = SCREEN_SIZE - map_w - MINIMAP_PADDING
+        # Draw persistent left inventory panel
+        draw_inventory_panel(cw, gy, gx)
+
+        # Draw minimap: show up to 3x3 neighbor rooms but only include existing world tiles
+        center_rx = room_x
+        center_ry = room_y
+        # Determine candidate columns and rows in range [center-1, center+1] but clamp to world bounds
+        cand_wx = [x for x in range(center_rx-1, center_rx+2) if 0 <= x < WORLD_W]
+        cand_wy = [y for y in range(center_ry-1, center_ry+2) if 0 <= y < WORLD_H]
+
+        cols = len(cand_wx)
+        rows = len(cand_wy)
+        map_w = cols * MINIMAP_TILE
+        map_h = rows * MINIMAP_TILE
+        map_x = canvas.get_width() - map_w - MINIMAP_PADDING
         map_y = MINIMAP_PADDING
-        pygame.draw.rect(screen, (10,10,10), (map_x-2, map_y-2, map_w+4, map_h+4))
-        for mx in range(3):
-            for my in range(3):
-                cell_x = map_x + mx * MINIMAP_TILE
-                cell_y = map_y + my * MINIMAP_TILE
-                world_coord = (mx, my)
-                if world is not None and world_coord in minimap_discovered:
-                    pygame.draw.rect(screen, (80, 80, 80), (cell_x, cell_y, MINIMAP_TILE, MINIMAP_TILE))
-                    # draw enemies if present in revealed room
-                    r = world.get(world_coord)
-                    if r:
+        # background box
+        pygame.draw.rect(canvas, (10,10,10), (map_x-3, map_y-3, map_w+6, map_h+6))
+
+        # flash when center changes
+        if prev_minimap_center != (center_rx, center_ry):
+            minimap_flash_timer = 12
+            prev_minimap_center = (center_rx, center_ry)
+
+        # iterate visible columns/rows
+        for ix, wx in enumerate(cand_wx):
+            for iy, wy in enumerate(cand_wy):
+                cell_x = map_x + ix * MINIMAP_TILE
+                cell_y = map_y + iy * MINIMAP_TILE
+                # default background
+                pygame.draw.rect(canvas, (20,20,20), (cell_x, cell_y, MINIMAP_TILE, MINIMAP_TILE))
+
+                if world is not None and (wx, wy) in world:
+                    r = world.get((wx, wy))
+                    if (wx, wy) in minimap_discovered:
+                        # draw mini internal tiles within cell
+                        mini_tile = max(1, MINIMAP_TILE // room.ROOM_TILES)
+                        for tx in range(room.ROOM_TILES):
+                            for ty in range(room.ROOM_TILES):
+                                px_x = cell_x + tx * mini_tile
+                                px_y = cell_y + ty * mini_tile
+                                if (tx, ty) in r.walls:
+                                    col = (60, 60, 60)
+                                else:
+                                    col = (100, 100, 100)
+                                pygame.draw.rect(canvas, col, (px_x, px_y, mini_tile, mini_tile))
+
+                        # draw doors as small highlights on the edges
+                        mid = room.ROOM_TILES // 2
+                        door_thickness = max(1, mini_tile)
+                        for door in r.doors:
+                            if door == 'U':
+                                dx = cell_x + mid * mini_tile
+                                dy = cell_y
+                                pygame.draw.rect(canvas, (180,180,60), (dx, dy, mini_tile, door_thickness))
+                            elif door == 'D':
+                                dx = cell_x + mid * mini_tile
+                                dy = cell_y + (room.ROOM_TILES-1) * mini_tile + (mini_tile - door_thickness)
+                                pygame.draw.rect(canvas, (180,180,60), (dx, dy, mini_tile, door_thickness))
+                            elif door == 'L':
+                                dx = cell_x
+                                dy = cell_y + mid * mini_tile
+                                pygame.draw.rect(canvas, (180,180,60), (dx, dy, door_thickness, mini_tile))
+                            elif door == 'R':
+                                dx = cell_x + (room.ROOM_TILES-1) * mini_tile + (mini_tile - door_thickness)
+                                dy = cell_y + mid * mini_tile
+                                pygame.draw.rect(canvas, (180,180,60), (dx, dy, door_thickness, mini_tile))
+
+                        # enemies
                         for en in r.enemies:
                             if en.alive:
-                                # small red dot inside the cell
-                                cx = cell_x + MINIMAP_TILE//2
-                                cy = cell_y + MINIMAP_TILE//2
-                                pygame.draw.circle(screen, (200,40,40), (cx, cy), 3)
-                    # Draw door markers for discovered rooms to show where you can go
-                    if r:
-                        midx = cell_x + MINIMAP_TILE // 2
-                        midy = cell_y + MINIMAP_TILE // 2
-                        for door in r.doors:
-                            if door == "U":
-                                pygame.draw.rect(screen, (180,180,60), (midx-3, cell_y, 6, 3))
-                            elif door == "D":
-                                pygame.draw.rect(screen, (180,180,60), (midx-3, cell_y+MINIMAP_TILE-3, 6, 3))
-                            elif door == "L":
-                                pygame.draw.rect(screen, (180,180,60), (cell_x, midy-3, 3, 6))
-                            elif door == "R":
-                                pygame.draw.rect(screen, (180,180,60), (cell_x+MINIMAP_TILE-3, midy-3, 3, 6))
+                                ex = cell_x + en.x * mini_tile + mini_tile // 2
+                                ey = cell_y + en.y * mini_tile + mini_tile // 2
+                                pygame.draw.circle(canvas, (200,40,40), (ex, ey), max(1, mini_tile//2))
+                    else:
+                        # existing but undiscovered: darker subtle square
+                        pygame.draw.rect(canvas, (10,10,10), (cell_x, cell_y, MINIMAP_TILE, MINIMAP_TILE))
                 else:
-                    # unrevealed = blank
-                    pygame.draw.rect(screen, (0, 0, 0), (cell_x, cell_y, MINIMAP_TILE, MINIMAP_TILE))
+                    # out-of-world: pure black (shouldn't happen as cand lists are clamped but keep safeguard)
+                    pygame.draw.rect(canvas, (0,0,0), (cell_x, cell_y, MINIMAP_TILE, MINIMAP_TILE))
 
-        # draw player marker on minimap if that room is revealed
-        if (room_x, room_y) in minimap_discovered:
-            px = map_x + room_x * MINIMAP_TILE + MINIMAP_TILE//2
-            py = map_y + room_y * MINIMAP_TILE + MINIMAP_TILE//2
-            pygame.draw.circle(screen, (160, 200, 160), (px, py), 5)
+                # cell border
+                border_color = (180,180,180) if (wx, wy) in minimap_discovered else (60,60,60)
+                pygame.draw.rect(canvas, border_color, (cell_x, cell_y, MINIMAP_TILE, MINIMAP_TILE), 1)
+
+        # highlight the player's cell if it's visible
+        if room_x in cand_wx and room_y in cand_wy:
+            ix = cand_wx.index(room_x)
+            iy = cand_wy.index(room_y)
+            center_cell_x = map_x + ix * MINIMAP_TILE
+            center_cell_y = map_y + iy * MINIMAP_TILE
+            if minimap_flash_timer > 0:
+                pygame.draw.rect(canvas, (255,255,120), (center_cell_x, center_cell_y, MINIMAP_TILE, MINIMAP_TILE), 3)
+                minimap_flash_timer -= 1
+            else:
+                pygame.draw.rect(canvas, (160,200,160), (center_cell_x+2, center_cell_y+2, MINIMAP_TILE-4, MINIMAP_TILE-4), 2)
+
+        # Draw player on minimap with sub-tile accuracy if visible
+        if room_x in cand_wx and room_y in cand_wy:
+            ix = cand_wx.index(room_x)
+            iy = cand_wy.index(room_y)
+            cell_x = map_x + ix * MINIMAP_TILE
+            cell_y = map_y + iy * MINIMAP_TILE
+            mini_tile = max(1, MINIMAP_TILE // room.ROOM_TILES)
+            # normalized in-room position (tile + offset)
+            pnx = (player.x + 0.5) + (player.offset_x / room.TILE_SIZE)
+            pny = (player.y + 0.5) + (player.offset_y / room.TILE_SIZE)
+            px = cell_x + int((pnx / room.ROOM_TILES) * MINIMAP_TILE)
+            py = cell_y + int((pny / room.ROOM_TILES) * MINIMAP_TILE)
+            pygame.draw.circle(canvas, (100, 255, 120), (px, py), max(1, mini_tile//2))
 
     elif state == STATE_QUESTION:
         draw_question(current_enemy)
 
     elif state == STATE_PAUSE:
-        room = world[(room_x, room_y)]
-        room.draw(screen)
-        player.draw(screen)
-        overlay = pygame.Surface((SCREEN_SIZE, SCREEN_SIZE))
+        p_room = world[(room_x, room_y)]
+        p_room.draw(canvas)
+        player.draw(canvas)
+        overlay = pygame.Surface((canvas.get_width(), canvas.get_height()))
         overlay.set_alpha(180)
         overlay.fill((0,0,0))
-        screen.blit(overlay, (0,0))
+        canvas.blit(overlay, (0,0))
         draw_text("Paused", 100, 50)
         draw_text("Title Screen", 100, 150, selected==0)
         draw_text("Exit", 100, 200, selected==1)
 
+    # If big map overlay is visible, black out the gameplay and draw the map on top
+    if big_map_visible:
+        # fully black out the gameplay so nothing behind the map distracts the user
+        canvas.fill((0,0,0))
+        # overlay surface same size as canvas
+        overlay = pygame.Surface(canvas.get_size(), pygame.SRCALPHA)
+        overlay.fill((0,0,0,255))  # opaque dark backdrop for the map
+
+        # compute world pixel size (room cell size depends on zoom)
+        room_px = int(BIGMAP_BASE * big_map_zoom)
+        world_px_w = WORLD_W * room_px
+        world_px_h = WORLD_H * room_px
+
+        # top-left origin for world is at pan offsets (in pixels)
+        ox = big_map_pan_x
+        oy = big_map_pan_y
+
+        # prepare recenter button rect (canvas-space)
+        cw, ch = canvas.get_size()
+        rec_w, rec_h = 110, 30
+        rec_x = cw - rec_w - 10
+        rec_y = 10
+        recenter_button_rect = pygame.Rect(rec_x, rec_y, rec_w, rec_h)
+
+        # draw grid and discovered rooms; capture the pixel origin of the player's room so marker math is consistent
+        player_room_rx = None
+        player_room_ry = None
+        for wx in range(WORLD_W):
+            for wy in range(WORLD_H):
+                rx = ox + wx * room_px
+                ry = oy + wy * room_px
+                # If the room exists in the world, render it differently depending on discovery
+                if world is not None and (wx, wy) in world:
+                    r = world.get((wx, wy))
+                    if (wx, wy) in minimap_discovered:
+                        # room background
+                        pygame.draw.rect(overlay, (80,80,80), (rx+1, ry+1, room_px-2, room_px-2))
+                        # draw a simple in-room tile grid showing walls similar to minimap
+                        mini = max(1, room_px // room.ROOM_TILES)
+                        for tx in range(room.ROOM_TILES):
+                            for ty in range(room.ROOM_TILES):
+                                sx = rx + tx * mini
+                                sy = ry + ty * mini
+                                if (tx, ty) in r.walls:
+                                    col = (40,40,40)
+                                else:
+                                    col = (100,100,100)
+                                pygame.draw.rect(overlay, col, (sx, sy, mini, mini))
+
+                        # doors as small blocks on edges
+                        half = room_px // 2
+                        th = max(1, room_px // 8)
+                        for d in r.doors:
+                            if d == 'U':
+                                pygame.draw.rect(overlay, (220,200,80), (rx+half-th//2, ry, th, th))
+                            if d == 'D':
+                                pygame.draw.rect(overlay, (220,200,80), (rx+half-th//2, ry+room_px-th, th, th))
+                            if d == 'L':
+                                pygame.draw.rect(overlay, (220,200,80), (rx, ry+half-th//2, th, th))
+                            if d == 'R':
+                                pygame.draw.rect(overlay, (220,200,80), (rx+room_px-th, ry+half-th//2, th, th))
+
+                        # enemy markers (use enemy offsets for sub-tile accuracy)
+                        for en in r.enemies:
+                            if en.alive:
+                                nx = (en.x + 0.5) + (en.offset_x / room.TILE_SIZE)
+                                ny = (en.y + 0.5) + (en.offset_y / room.TILE_SIZE)
+                                ex = rx + int((nx / room.ROOM_TILES) * room_px)
+                                ey = ry + int((ny / room.ROOM_TILES) * room_px)
+                                pygame.draw.circle(overlay, (200,40,40), (ex, ey), max(2, room_px//8))
+                    else:
+                        # room exists but is undiscovered: dark subtle square
+                        pygame.draw.rect(overlay, (10,10,10), (rx+1, ry+1, room_px-2, room_px-2))
+                else:
+                    # out-of-world / non-existing tile: pure black
+                    pygame.draw.rect(overlay, (0,0,0), (rx+1, ry+1, room_px-2, room_px-2))
+                # if this is the player's current room record its pixel origin
+                if (wx, wy) == (room_x, room_y):
+                    player_room_rx = rx
+                    player_room_ry = ry
+
+        # draw player marker (if world exists) using recorded player's room pixel origin when available
+        if world is not None:
+            # normalized in-room position (tile center + offset)
+            in_x = (player.x + 0.5) + (player.offset_x / max(1, room.TILE_SIZE))
+            in_y = (player.y + 0.5) + (player.offset_y / max(1, room.TILE_SIZE))
+            # convert to pixels within the room cell
+            sub_px_x = int((in_x / room.ROOM_TILES) * room_px)
+            sub_px_y = int((in_y / room.ROOM_TILES) * room_px)
+            # Prefer using the pixel origin captured while drawing rooms to avoid any math drift
+            if player_room_rx is not None and player_room_ry is not None:
+                prx = player_room_rx + sub_px_x
+                pry = player_room_ry + sub_px_y
+            else:
+                # fallback to computed world coordinates
+                prx = ox + (room_x * room_px) + sub_px_x
+                pry = oy + (room_y * room_px) + sub_px_y
+
+            # Only recenter automatically right after the map is opened. If the user is
+            # panning/dragging the map we should not override their pan.
+            cw, ch = canvas.get_size()
+            if big_map_just_opened:
+                if prx < 0 or prx >= cw or pry < 0 or pry >= ch:
+                    # compute player's world position in pixels
+                    prx_world = (room_x * room_px) + sub_px_x
+                    pry_world = (room_y * room_px) + sub_px_y
+                    big_map_pan_x = cw//2 - prx_world
+                    big_map_pan_y = ch//2 - pry_world
+                    clamp_big_map_pan()
+                    ox = big_map_pan_x
+                    oy = big_map_pan_y
+                    prx = ox + prx_world
+                    pry = oy + pry_world
+                # clear the just-opened flag so we don't keep recentering
+                big_map_just_opened = False
+
+            # dark outline circle to hide any red artifacts from underlying graphics
+            outline_thickness = max(1, room_px // 16)
+            pygame.draw.circle(overlay, (0, 0, 0), (prx, pry), max(4, room_px//6 + outline_thickness))
+            pygame.draw.circle(overlay, (160, 220, 160), (prx, pry), max(4, room_px//6))
+
+        # draw recenter button
+        pygame.draw.rect(overlay, (60,60,60), recenter_button_rect)
+        pygame.draw.rect(overlay, (180,180,180), recenter_button_rect, 2)
+        bt = font.render("Recenter", True, (220,220,220))
+        overlay.blit(bt, (rec_x + 10, rec_y + (rec_h - bt.get_height())//2))
+
+        # hint text
+        hint = font.render("Big Map - drag to pan, mouse wheel to zoom, press M to close", True, (220,220,220))
+        overlay.blit(hint, (10, canvas.get_height() - 30))
+
+        # blit overlay onto canvas
+        canvas.blit(overlay, (0,0))
+
+    # Draw chest modal if open (on top of gameplay)
+    if state == STATE_OVERWORLD and chest_open and chest_grid is not None:
+        # draw translucent backdrop
+        overlay = pygame.Surface(canvas.get_size(), pygame.SRCALPHA)
+        overlay.fill((0,0,0,160))
+        canvas.blit(overlay, (0,0))
+        sx, sy, slot_size, slot_gap, cmx, cmy = draw_chest_modal(chest_grid)
+
+    # Draw dragged item under cursor if active
+    if dragging_item is not None:
+        mx, my = get_canvas_mouse_pos()
+        # simple square preview
+        pygame.draw.rect(canvas, (200,200,120), (mx-16, my-16, 32, 32))
+
+    # scale/blit canvas to actual display surface
+    try:
+        scaled = pygame.transform.scale(canvas, screen.get_size())
+        screen.blit(scaled, (0,0))
+    except Exception:
+        # fallback: if scaling fails, try blitting without scaling
+        screen.blit(canvas, (0,0))
+
     pygame.display.flip()
     clock.tick(60)
+

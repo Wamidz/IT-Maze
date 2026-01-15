@@ -2,6 +2,11 @@ from room import Room
 from enemy import Enemy
 from questions import QUESTIONS
 import random
+try:
+    from items import Item
+    from items import small_heal, med_heal, battery_boost
+except Exception:
+    Item = None
 
 def are_opposite(dirs):
     return ("U" in dirs and "D" in dirs) or ("L" in dirs and "R" in dirs)
@@ -86,5 +91,21 @@ def generate_maze_with_room_types(width=3, height=3, difficulty=1):
 
             q = random.choice(QUESTIONS)
             room.enemies.append(Enemy(ex, ey, question=q))
+        # occasional chest spawn with its own inventory
+        if random.random() < 0.18:
+            # pick chest location
+            for _a in range(20):
+                cx, cy = random.randint(1,7), random.randint(1,7)
+                if (cx, cy) not in room.walls and all(not (e.x == cx and e.y == cy) for e in room.enemies):
+                    chest_grid = room.add_chest(cx, cy, grid_width=4, grid_height=3)
+                    # populate chest with a few items
+                    # use factory helpers if available
+                    try:
+                        chest_grid.place_item(small_heal().to_dict())
+                        chest_grid.place_item(battery_boost().to_dict())
+                        chest_grid.place_item(med_heal().to_dict())
+                    except Exception:
+                        chest_grid.place_item({'id':'small_heal','name':'Small Heal','type':'heal','value':25,'w':1,'h':1})
+                    break
 
     return rooms

@@ -10,6 +10,14 @@ class Enemy:
         # alive and data
         self.alive = True
         self.data = question
+        # Basic combat stats
+        self.max_hp = 50
+        self.hp = self.max_hp
+
+    def apply_damage(self, amount: int):
+        self.hp = max(0, self.hp - int(amount))
+        if self.hp == 0:
+            self.alive = False
 
     def _enemy_rect(self, off_x=None, off_y=None):
         size = room.TILE_SIZE
