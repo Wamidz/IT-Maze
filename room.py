@@ -1,8 +1,18 @@
 import pygame
 
+# Default tile size (pixels) — can be changed at runtime with set_tile_size()
 TILE_SIZE = 64
 ROOM_TILES = 9
-SCREEN_SIZE = TILE_SIZE * ROOM_TILES
+
+def set_tile_size(new_size: int):
+    """Set the module-wide TILE_SIZE. Other modules should access room.TILE_SIZE
+    (or call room.get_screen_size()) so changes are visible at runtime.
+    """
+    global TILE_SIZE
+    TILE_SIZE = int(new_size)
+
+def get_screen_size():
+    return TILE_SIZE * ROOM_TILES
 
 class Room:
     def __init__(self, doors=None, enemies=None):
@@ -40,6 +50,15 @@ class Room:
     def walls(self):
         # Compute on access to reflect current door state
         return self._generate_walls()
+
+    def get_wall_rects(self):
+        """Return a list of pygame.Rect in pixel coordinates representing wall tiles.
+        This lets collision be tested in pixel space so walls scale physically with TILE_SIZE.
+        """
+        rects = []
+        for x, y in self.walls:
+            rects.append(pygame.Rect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE))
+        return rects
 
     def draw(self, screen):
         screen.fill((30, 30, 30))
