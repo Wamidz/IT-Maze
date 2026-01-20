@@ -5,7 +5,7 @@ It avoids initializing any pygame display or drawing functions.
 import random
 from player import Player
 from world import generate_maze_with_room_types
-from questions import QUESTIONS
+from questions import QUESTIONS_VG1, QUESTIONS_VG2, QUESTIONS_HARD
 
 random.seed(0)
 
@@ -38,9 +38,9 @@ for tick in range(5):
 print("Update ticks completed successfully")
 
 # Sanity-check questions
-for q in QUESTIONS:
+all_questions = QUESTIONS_VG1 + QUESTIONS_VG2 + QUESTIONS_HARD
+for q in all_questions:
     assert 'q' in q and 'options' in q and 'correct' in q
 
 print("Questions format OK")
 print("Smoke test passed")
-

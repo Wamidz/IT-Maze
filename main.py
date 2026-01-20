@@ -4,6 +4,7 @@ from player import Player
 from world import generate_maze_with_room_types
 import room
 import copy
+import random
 
 pygame.init()
 pygame.display.init()
@@ -16,7 +17,7 @@ if info.current_w <= 0 or info.current_h <= 0:
     info = pygame.display.Info()
     # we can keep this tiny window until we call apply_graphics_options(), which will replace it
 
-pygame.display.set_caption("Inside the Network")
+pygame.display.set_caption("IM Maze")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 32)
 
@@ -67,6 +68,10 @@ STATE_OPTIONS = "options"
 STATE_GRAPHICS = "graphics"
 STATE_CONTROLS = "controls"
 STATE_AUDIO = "audio"
+STATE_GAMEOVER = "gameover"
+STATE_COMBAT = "combat"
+STATE_CHEAT = "cheat"
+STATE_WIN = "win"
 
 state = STATE_TITLE
 difficulty = 1
@@ -76,6 +81,15 @@ room_x = 0
 room_y = 0
 current_enemy = None
 selected = 0
+
+# Combat state variables
+combat_turn = "player" # "player" or "enemy"
+combat_action = "menu" # "menu", "attack_minigame", "defend_minigame", "question"
+combat_timer = 0
+combat_player_pos = [0, 0] # For minigames
+combat_projectiles = [] # List of projectiles in minigame
+combat_score = 0
+combat_question_answered = False
 
 # World & minimap configuration
 WORLD_W = 21
@@ -243,10 +257,24 @@ def menu_items_for_state(cur_state):
         items = [("Back", 100, 250)]
     elif cur_state == STATE_PAUSE:
         items = [("Title Screen", 100, 150), ("Exit", 100, 200)]
-    elif cur_state == STATE_QUESTION and current_enemy:
-        # click an answer (we'll list answers in vertical order)
-        for i, opt in enumerate(current_enemy.data["options"]):
-            items.append((opt, 60, 100 + i*40))
+    elif cur_state == STATE_GAMEOVER:
+        items = [("Try Again", 100, 150), ("Title Screen", 100, 200), ("Exit", 100, 250)]
+    elif cur_state == STATE_WIN:
+        items = [("New Game", 100, 150), ("Title Screen", 100, 200), ("Exit", 100, 250)]
+    elif cur_state == STATE_COMBAT:
+        if combat_action == "menu":
+            items = [("Attack", 100, 350), ("Answer Question", 100, 400)]
+        elif combat_action == "question":
+            for i, opt in enumerate(current_enemy.data["options"]):
+                items.append((opt, 60, 100 + i*40))
+    elif cur_state == STATE_CHEAT:
+        items = [
+            (f"Noclip: {'ON' if player.noclip else 'OFF'}", 100, 150),
+            (f"Godmode: {'ON' if player.godmode else 'OFF'}", 100, 200),
+            ("Reveal Map", 100, 250),
+            ("Show Exit", 100, 300),
+            ("Back", 100, 350)
+        ]
     return items
 
 
@@ -346,6 +374,154 @@ def draw_question(enemy):
     for i, opt in enumerate(enemy.data["options"]):
         draw_text(opt, 60, 100 + i*40, selected == i)
 
+def start_combat(enemy):
+    global state, current_enemy, combat_turn, combat_action, selected, combat_question_answered
+    state = STATE_COMBAT
+    current_enemy = enemy
+    combat_turn = "player"
+    combat_action = "menu"
+    selected = 0
+    combat_question_answered = False
+
+def start_defend_minigame():
+    global combat_action, combat_timer, combat_player_pos, combat_projectiles
+    combat_action = "defend_minigame"
+    combat_timer = 300 # 5 seconds at 60fps
+    combat_player_pos = [canvas.get_width() // 2, canvas.get_height() // 2]
+    combat_projectiles = []
+
+def update_defend_minigame(keys):
+    global combat_timer, player, state, selected
+    combat_timer -= 1
+    
+    # Move player heart
+    speed = 4
+    if keys["up"]: combat_player_pos[1] -= speed
+    if keys["down"]: combat_player_pos[1] += speed
+    if keys["left"]: combat_player_pos[0] -= speed
+    if keys["right"]: combat_player_pos[0] += speed
+    
+    # Clamp to box
+    box_rect = pygame.Rect(canvas.get_width()//2 - 100, canvas.get_height()//2 - 100, 200, 200)
+    combat_player_pos[0] = max(box_rect.left + 10, min(box_rect.right - 10, combat_player_pos[0]))
+    combat_player_pos[1] = max(box_rect.top + 10, min(box_rect.bottom - 10, combat_player_pos[1]))
+    
+    # Spawn projectiles
+    if random.random() < 0.1:
+        side = random.choice(["top", "bottom", "left", "right"])
+        if side == "top":
+            start = [random.randint(box_rect.left, box_rect.right), box_rect.top]
+            vel = [0, 3]
+        elif side == "bottom":
+            start = [random.randint(box_rect.left, box_rect.right), box_rect.bottom]
+            vel = [0, -3]
+        elif side == "left":
+            start = [box_rect.left, random.randint(box_rect.top, box_rect.bottom)]
+            vel = [3, 0]
+        else:
+            start = [box_rect.right, random.randint(box_rect.top, box_rect.bottom)]
+            vel = [-3, 0]
+        combat_projectiles.append({"pos": start, "vel": vel})
+        
+    # Update projectiles
+    player_rect = pygame.Rect(0, 0, 16, 16)
+    player_rect.center = combat_player_pos
+    
+    for p in combat_projectiles[:]:
+        p["pos"][0] += p["vel"][0]
+        p["pos"][1] += p["vel"][1]
+        
+        # Collision
+        proj_rect = pygame.Rect(0, 0, 10, 10)
+        proj_rect.center = p["pos"]
+        
+        if player_rect.colliderect(proj_rect):
+            player.apply_damage(5)
+            combat_projectiles.remove(p)
+            if player.hp <= 0:
+                state = STATE_GAMEOVER
+                selected = 0
+                return
+        
+        # Remove if out of bounds (roughly)
+        if not box_rect.inflate(20, 20).collidepoint(p["pos"]):
+            if p in combat_projectiles:
+                combat_projectiles.remove(p)
+                
+    if combat_timer <= 0:
+        # End turn
+        global combat_turn, combat_action
+        combat_turn = "player"
+        combat_action = "menu"
+        selected = 0
+
+def draw_defend_minigame():
+    box_rect = pygame.Rect(canvas.get_width()//2 - 100, canvas.get_height()//2 - 100, 200, 200)
+    pygame.draw.rect(canvas, (255, 255, 255), box_rect, 2)
+    
+    # Draw player heart
+    pygame.draw.rect(canvas, (255, 0, 0), (combat_player_pos[0]-8, combat_player_pos[1]-8, 16, 16))
+    
+    # Draw projectiles
+    for p in combat_projectiles:
+        pygame.draw.circle(canvas, (255, 255, 255), (int(p["pos"][0]), int(p["pos"][1])), 5)
+        
+    draw_text(f"Dodge! Time: {combat_timer//60}", 100, 50)
+
+def start_attack_minigame():
+    global combat_action, combat_timer, combat_score
+    combat_action = "attack_minigame"
+    combat_timer = 0
+    combat_score = 0 # Used for bar position
+
+def update_attack_minigame(keys):
+    global combat_score, combat_timer, current_enemy, combat_turn, combat_action, selected, minimap_discovered, state
+    # Bar moves back and forth
+    combat_score = (combat_score + 5) % 400 # 0 to 400 range
+    
+    # Press Z or Enter to hit
+    # Logic handled in event loop for key press, this is just animation update
+    pass
+
+def handle_attack_hit():
+    global combat_score, current_enemy, combat_turn, combat_action, selected, minimap_discovered, state, combat_question_answered
+    
+    # Calculate damage based on how close to center (200)
+    dist = abs(combat_score - 200)
+    damage = 0
+    if dist < 20:
+        damage = 20 # Crit
+    elif dist < 50:
+        damage = 10
+    else:
+        damage = 5
+        
+    # Bonus if question was answered correctly previously
+    if combat_question_answered:
+        damage *= 2
+        
+    current_enemy.apply_damage(damage)
+    
+    if not current_enemy.alive:
+        minimap_discovered.add((room_x, room_y))
+        state = STATE_OVERWORLD
+    else:
+        start_defend_minigame()
+
+def draw_attack_minigame():
+    bar_rect = pygame.Rect(canvas.get_width()//2 - 200, canvas.get_height()//2 + 50, 400, 30)
+    pygame.draw.rect(canvas, (100, 100, 100), bar_rect)
+    
+    # Target area
+    target_rect = pygame.Rect(canvas.get_width()//2 - 20, canvas.get_height()//2 + 50, 40, 30)
+    pygame.draw.rect(canvas, (0, 255, 0), target_rect)
+    
+    # Moving cursor
+    cursor_x = canvas.get_width()//2 - 200 + combat_score
+    pygame.draw.rect(canvas, (255, 255, 255), (cursor_x, canvas.get_height()//2 + 45, 5, 40))
+    
+    draw_text("Press ENTER when white bar is in green!", 100, 100)
+
 
 def handle_keys():
     keys = pygame.key.get_pressed()
@@ -356,7 +532,7 @@ def handle_keys():
 
 
 def draw_title_menu():
-    draw_text("Inside the Network", 60, 50)
+    draw_text("IM Maze", 60, 50)
     draw_text("New Game", 100, 150, selected==0)
     draw_text("Options", 100, 200, selected==1)
     draw_text("Exit", 100, 250, selected==2)
@@ -477,6 +653,23 @@ def screen_to_chest_grid(mx, my, chest_sx, chest_sy, slot_size, slot_gap, grid):
     if cx < 0 or cy < 0 or cx >= grid.width or cy >= grid.height:
         return None
     return int(cx), int(cy)
+
+def handle_inventory_click(mx, my, gx, gy):
+    """Handle clicks on the player inventory panel (e.g. using items)."""
+    pg = screen_to_player_grid(mx, my, gx, gy)
+    if pg:
+        px, py = pg
+        # Right click to use item? Or just click?
+        # For now, let's say right click uses item, left click drags (handled in main loop)
+        # But this function is called inside left click handler in main loop...
+        # Let's assume this function is for 'using' items if we want that on left click,
+        # but the main loop prioritizes dragging.
+        # Actually, let's make it so if you click an item and it's consumable, maybe we use it?
+        # Or maybe we need a separate key for using.
+        # For now, let's just return False so dragging logic takes over.
+        # If we want to support using items, we might need to check for double click or right click.
+        pass
+    return False
 
 # ensure initial application of graphics options (setup canvas & screen)
 apply_graphics_options()
@@ -654,6 +847,25 @@ while True:
                         selected = i
                         break
 
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+            # Right click handling
+            mx, my = get_canvas_mouse_pos()
+            if state == STATE_OVERWORLD and not big_map_visible:
+                # Check for right click on inventory to use item
+                tsize = room.TILE_SIZE
+                game_w = room.ROOM_TILES * tsize
+                game_h = room.ROOM_TILES * tsize
+                cw, ch = canvas.get_size()
+                gx = (cw - game_w) // 2
+                gy = (ch - game_h) // 2
+                
+                if gx > 40:
+                    pg = screen_to_player_grid(mx, my, gx, gy)
+                    if pg:
+                        px, py = pg
+                        # Try to use item at this location
+                        player.use_item(px, py)
+
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             # left click acts like pressing Enter / interacting with menus
             mx, my = get_canvas_mouse_pos()
@@ -680,9 +892,7 @@ while True:
                             drag_origin = (player.inventory, px, py)
                             drag_mouse_offset = (mx, my)
                             continue
-                    used = handle_inventory_click(mx, my, gx, gy)
-                    if used:
-                        continue
+                    # handle_inventory_click removed as it was unused
 
                 # check chest interaction (E opens chests; mouse can click chest to open if present)
                 room_obj = world[(room_x, room_y)]
@@ -794,9 +1004,77 @@ while True:
                         if selected == current_enemy.data["correct"]:
                             current_enemy.alive = False
                             minimap_discovered.add((room_x, room_y))
-                        state = STATE_OVERWORLD
+                        else:
+                            # Wrong answer
+                            player.apply_damage(25)
+                            current_enemy.alive = False # Remove enemy to prevent loop
+                        
+                        if player.hp <= 0:
+                            state = STATE_GAMEOVER
+                            selected = 0
+                        else:
+                            state = STATE_OVERWORLD
                     elif state == STATE_PAUSE:
                         if selected == 0:
+                            state = STATE_TITLE
+                            selected = 0
+                        else:
+                            pygame.quit()
+                            sys.exit()
+                    elif state == STATE_GAMEOVER:
+                        if selected == 0:
+                            # Try Again (same difficulty)
+                            start_new_world(WORLD_W, WORLD_H, difficulty)
+                            state = STATE_OVERWORLD
+                        elif selected == 1:
+                            state = STATE_TITLE
+                            selected = 0
+                        else:
+                            pygame.quit()
+                            sys.exit()
+                    elif state == STATE_COMBAT:
+                        if combat_action == "menu":
+                            if selected == 0: # Attack
+                                start_attack_minigame()
+                            elif selected == 1: # Question
+                                combat_action = "question"
+                                selected = 0
+                        elif combat_action == "question":
+                            if selected == current_enemy.data["correct"]:
+                                combat_question_answered = True
+                                start_defend_minigame()
+                            else:
+                                # Wrong answer, take damage and end turn
+                                player.apply_damage(10)
+                                if player.hp <= 0:
+                                    state = STATE_GAMEOVER
+                                    selected = 0
+                                else:
+                                    start_defend_minigame()
+                    elif state == STATE_CHEAT:
+                        if selected == 0:
+                            player.noclip = not player.noclip
+                        elif selected == 1:
+                            player.godmode = not player.godmode
+                        elif selected == 2:
+                            # Reveal map
+                            for x in range(WORLD_W):
+                                for y in range(WORLD_H):
+                                    minimap_discovered.add((x, y))
+                        elif selected == 3:
+                            # Show exit (find exit room and add to discovered)
+                            for coord, r in world.items():
+                                if r.is_exit:
+                                    minimap_discovered.add(coord)
+                                    # Also teleport player there for convenience? No, just show it.
+                        elif selected == 4:
+                            state = STATE_OVERWORLD
+                            selected = 0
+                    elif state == STATE_WIN:
+                        if selected == 0:
+                            start_new_world(WORLD_W, WORLD_H, difficulty)
+                            state = STATE_OVERWORLD
+                        elif selected == 1:
                             state = STATE_TITLE
                             selected = 0
                         else:
@@ -960,7 +1238,7 @@ while True:
         elif state == STATE_OVERWORLD and event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 state = STATE_PAUSE
-            elif event.key == pygame.K_e:
+            elif event.key == pygame.K_e or event.key == pygame.K_RETURN:
                 # toggle chest open/close near player
                 room_obj = world[(room_x, room_y)]
                 if chest_open:
@@ -980,6 +1258,20 @@ while True:
                     if found:
                         chest_grid, chest_owner_coords = found[0], found[1]
                         chest_open = True
+                    
+                    # Check for exit
+                    if room_obj.is_exit:
+                        ex, ey = room_obj.exit_coords
+                        # Check if player is on or adjacent to exit
+                        dist = abs(player.x - ex) + abs(player.y - ey)
+                        if dist <= 1:
+                            state = STATE_WIN
+                            selected = 0
+
+            elif event.key == pygame.K_F1:
+                # Secret cheat menu
+                state = STATE_CHEAT
+                selected = 0
 
         # PAUSE
         elif state == STATE_PAUSE and event.type == pygame.KEYDOWN:
@@ -994,6 +1286,99 @@ while True:
                     sys.exit()
             elif event.key == pygame.K_ESCAPE:
                 state = STATE_OVERWORLD
+
+        # GAMEOVER
+        elif state == STATE_GAMEOVER and event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_UP:
+                selected = (selected - 1) % 3
+            elif event.key == pygame.K_DOWN:
+                selected = (selected + 1) % 3
+            elif event.key == pygame.K_RETURN:
+                if selected == 0:
+                    start_new_world(WORLD_W, WORLD_H, difficulty)
+                    state = STATE_OVERWORLD
+                elif selected == 1:
+                    state = STATE_TITLE
+                    selected = 0
+                else:
+                    pygame.quit()
+                    sys.exit()
+        
+        # WIN
+        elif state == STATE_WIN and event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_UP:
+                selected = (selected - 1) % 3
+            elif event.key == pygame.K_DOWN:
+                selected = (selected + 1) % 3
+            elif event.key == pygame.K_RETURN:
+                if selected == 0:
+                    start_new_world(WORLD_W, WORLD_H, difficulty)
+                    state = STATE_OVERWORLD
+                elif selected == 1:
+                    state = STATE_TITLE
+                    selected = 0
+                else:
+                    pygame.quit()
+                    sys.exit()
+        
+        # COMBAT
+        elif state == STATE_COMBAT and event.type == pygame.KEYDOWN:
+            if combat_action == "menu":
+                if event.key == pygame.K_UP or event.key == pygame.K_DOWN:
+                    selected = 1 - selected
+                elif event.key == pygame.K_RETURN:
+                    if selected == 0: # Attack
+                        start_attack_minigame()
+                    elif selected == 1: # Question
+                        combat_action = "question"
+                        selected = 0
+            elif combat_action == "question":
+                if event.key == pygame.K_UP:
+                    selected = (selected - 1) % len(current_enemy.data["options"])
+                elif event.key == pygame.K_DOWN:
+                    selected = (selected + 1) % len(current_enemy.data["options"])
+                elif event.key == pygame.K_RETURN:
+                    if selected == current_enemy.data["correct"]:
+                        combat_question_answered = True
+                        start_defend_minigame()
+                    else:
+                        player.apply_damage(10)
+                        if player.hp <= 0:
+                            state = STATE_GAMEOVER
+                            selected = 0
+                        else:
+                            start_defend_minigame()
+            elif combat_action == "attack_minigame":
+                if event.key == pygame.K_RETURN or event.key == pygame.K_z:
+                    handle_attack_hit()
+        
+        # CHEAT MENU
+        elif state == STATE_CHEAT and event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_UP:
+                selected = (selected - 1) % 5
+            elif event.key == pygame.K_DOWN:
+                selected = (selected + 1) % 5
+            elif event.key == pygame.K_RETURN:
+                if selected == 0:
+                    player.noclip = not player.noclip
+                elif selected == 1:
+                    player.godmode = not player.godmode
+                elif selected == 2:
+                    # Reveal map
+                    for x in range(WORLD_W):
+                        for y in range(WORLD_H):
+                            minimap_discovered.add((x, y))
+                elif selected == 3:
+                    # Show exit (find exit room and add to discovered)
+                    for coord, r in world.items():
+                        if r.is_exit:
+                            minimap_discovered.add(coord)
+                elif selected == 4:
+                    state = STATE_OVERWORLD
+                    selected = 0
+            elif event.key == pygame.K_ESCAPE:
+                state = STATE_OVERWORLD
+                selected = 0
 
     keys = handle_keys()
 
@@ -1068,18 +1453,18 @@ while True:
 
         # If the big map is open, pause world updates so gameplay doesn't move behind the map
         if not big_map_visible:
-            player.update(keys, room_obj)
-            # Update enemies, passing others so they don't overlap
-            for i, e in enumerate(room_obj.enemies):
-                others = room_obj.enemies[:i] + room_obj.enemies[i+1:]
-                e.update(player, room_obj, others=others)
+            # Only update player/enemies if chest is NOT open
+            if not chest_open:
+                player.update(keys, room_obj)
+                # Update enemies, passing others so they don't overlap
+                for i, e in enumerate(room_obj.enemies):
+                    others = room_obj.enemies[:i] + room_obj.enemies[i+1:]
+                    e.update(player, room_obj, others=others)
 
-            # Enemy collision (only when not viewing big map)
-            for e in room_obj.enemies:
-                if e.alive and e.x == player.x and e.y == player.y:
-                    current_enemy = e
-                    selected = 0
-                    state = STATE_QUESTION
+                # Enemy collision (only when not viewing big map)
+                for e in room_obj.enemies:
+                    if e.alive and e.x == player.x and e.y == player.y:
+                        start_combat(e)
 
          # draw room and player onto a centered game surface then blit into the canvas
         # compute game area size from current tile size
@@ -1134,28 +1519,40 @@ while True:
 
         # ROOM TRANSITIONS (door must exist)
         size = room.ROOM_TILES
-        if player.x < 0 and "L" in room_obj.doors:
-            if (room_x-1, room_y) in world:
-                room_x -= 1
-                player.x = size-1
+        if player.x < 0:
+            if "L" in room_obj.doors or player.noclip:
+                if (room_x-1, room_y) in world:
+                    room_x -= 1
+                    player.x = size-1
+                else:
+                    player.x = 0
             else:
                 player.x = 0
-        elif player.x > size-1 and "R" in room_obj.doors:
-            if (room_x+1, room_y) in world:
-                room_x += 1
-                player.x = 0
+        elif player.x > size-1:
+            if "R" in room_obj.doors or player.noclip:
+                if (room_x+1, room_y) in world:
+                    room_x += 1
+                    player.x = 0
+                else:
+                    player.x = size-1
             else:
                 player.x = size-1
-        elif player.y < 0 and "U" in room_obj.doors:
-            if (room_x, room_y-1) in world:
-                room_y -= 1
-                player.y = size-1
+        elif player.y < 0:
+            if "U" in room_obj.doors or player.noclip:
+                if (room_x, room_y-1) in world:
+                    room_y -= 1
+                    player.y = size-1
+                else:
+                    player.y = 0
             else:
                 player.y = 0
-        elif player.y > size-1 and "D" in room_obj.doors:
-            if (room_x, room_y+1) in world:
-                room_y += 1
-                player.y = 0
+        elif player.y > size-1:
+            if "D" in room_obj.doors or player.noclip:
+                if (room_x, room_y+1) in world:
+                    room_y += 1
+                    player.y = 0
+                else:
+                    player.y = size-1
             else:
                 player.y = size-1
 
@@ -1234,132 +1631,10 @@ while True:
                                 ey = cell_y + en.y * mini_tile + mini_tile // 2
                                 pygame.draw.circle(canvas, (200,40,40), (ex, ey), max(1, mini_tile//2))
                     else:
-                        # existing but undiscovered: darker subtle square
-                        pygame.draw.rect(canvas, (10,10,10), (cell_x, cell_y, MINIMAP_TILE, MINIMAP_TILE))
-                else:
-                    # out-of-world: pure black (shouldn't happen as cand lists are clamped but keep safeguard)
-                    pygame.draw.rect(canvas, (0,0,0), (cell_x, cell_y, MINIMAP_TILE, MINIMAP_TILE))
-
-                # cell border
-                border_color = (180,180,180) if (wx, wy) in minimap_discovered else (60,60,60)
-                pygame.draw.rect(canvas, border_color, (cell_x, cell_y, MINIMAP_TILE, MINIMAP_TILE), 1)
-
-        # highlight the player's cell if it's visible
-        if room_x in cand_wx and room_y in cand_wy:
-            ix = cand_wx.index(room_x)
-            iy = cand_wy.index(room_y)
-            center_cell_x = map_x + ix * MINIMAP_TILE
-            center_cell_y = map_y + iy * MINIMAP_TILE
-            if minimap_flash_timer > 0:
-                pygame.draw.rect(canvas, (255,255,120), (center_cell_x, center_cell_y, MINIMAP_TILE, MINIMAP_TILE), 3)
-                minimap_flash_timer -= 1
-            else:
-                pygame.draw.rect(canvas, (160,200,160), (center_cell_x+2, center_cell_y+2, MINIMAP_TILE-4, MINIMAP_TILE-4), 2)
-
-        # Draw player on minimap with sub-tile accuracy if visible
-        if room_x in cand_wx and room_y in cand_wy:
-            ix = cand_wx.index(room_x)
-            iy = cand_wy.index(room_y)
-            cell_x = map_x + ix * MINIMAP_TILE
-            cell_y = map_y + iy * MINIMAP_TILE
-            mini_tile = max(1, MINIMAP_TILE // room.ROOM_TILES)
-            # normalized in-room position (tile + offset)
-            pnx = (player.x + 0.5) + (player.offset_x / room.TILE_SIZE)
-            pny = (player.y + 0.5) + (player.offset_y / room.TILE_SIZE)
-            px = cell_x + int((pnx / room.ROOM_TILES) * MINIMAP_TILE)
-            py = cell_y + int((pny / room.ROOM_TILES) * MINIMAP_TILE)
-            pygame.draw.circle(canvas, (100, 255, 120), (px, py), max(1, mini_tile//2))
-
-    elif state == STATE_QUESTION:
-        draw_question(current_enemy)
-
-    elif state == STATE_PAUSE:
-        p_room = world[(room_x, room_y)]
-        p_room.draw(canvas)
-        player.draw(canvas)
-        overlay = pygame.Surface((canvas.get_width(), canvas.get_height()))
-        overlay.set_alpha(180)
-        overlay.fill((0,0,0))
-        canvas.blit(overlay, (0,0))
-        draw_text("Paused", 100, 50)
-        draw_text("Title Screen", 100, 150, selected==0)
-        draw_text("Exit", 100, 200, selected==1)
-
-    # If big map overlay is visible, black out the gameplay and draw the map on top
-    if big_map_visible:
-        # fully black out the gameplay so nothing behind the map distracts the user
-        canvas.fill((0,0,0))
-        # overlay surface same size as canvas
-        overlay = pygame.Surface(canvas.get_size(), pygame.SRCALPHA)
-        overlay.fill((0,0,0,255))  # opaque dark backdrop for the map
-
-        # compute world pixel size (room cell size depends on zoom)
-        room_px = int(BIGMAP_BASE * big_map_zoom)
-        world_px_w = WORLD_W * room_px
-        world_px_h = WORLD_H * room_px
-
-        # top-left origin for world is at pan offsets (in pixels)
-        ox = big_map_pan_x
-        oy = big_map_pan_y
-
-        # prepare recenter button rect (canvas-space)
-        cw, ch = canvas.get_size()
-        rec_w, rec_h = 110, 30
-        rec_x = cw - rec_w - 10
-        rec_y = 10
-        recenter_button_rect = pygame.Rect(rec_x, rec_y, rec_w, rec_h)
-
-        # draw grid and discovered rooms; capture the pixel origin of the player's room so marker math is consistent
-        player_room_rx = None
-        player_room_ry = None
-        for wx in range(WORLD_W):
-            for wy in range(WORLD_H):
-                rx = ox + wx * room_px
-                ry = oy + wy * room_px
-                # If the room exists in the world, render it differently depending on discovery
-                if world is not None and (wx, wy) in world:
-                    r = world.get((wx, wy))
-                    if (wx, wy) in minimap_discovered:
-                        # room background
-                        pygame.draw.rect(overlay, (80,80,80), (rx+1, ry+1, room_px-2, room_px-2))
-                        # draw a simple in-room tile grid showing walls similar to minimap
-                        mini = max(1, room_px // room.ROOM_TILES)
-                        for tx in range(room.ROOM_TILES):
-                            for ty in range(room.ROOM_TILES):
-                                sx = rx + tx * mini
-                                sy = ry + ty * mini
-                                if (tx, ty) in r.walls:
-                                    col = (40,40,40)
-                                else:
-                                    col = (100,100,100)
-                                pygame.draw.rect(overlay, col, (sx, sy, mini, mini))
-
-                        # doors as small blocks on edges
-                        half = room_px // 2
-                        th = max(1, room_px // 8)
-                        for d in r.doors:
-                            if d == 'U':
-                                pygame.draw.rect(overlay, (220,200,80), (rx+half-th//2, ry, th, th))
-                            if d == 'D':
-                                pygame.draw.rect(overlay, (220,200,80), (rx+half-th//2, ry+room_px-th, th, th))
-                            if d == 'L':
-                                pygame.draw.rect(overlay, (220,200,80), (rx, ry+half-th//2, th, th))
-                            if d == 'R':
-                                pygame.draw.rect(overlay, (220,200,80), (rx+room_px-th, ry+half-th//2, th, th))
-
-                        # enemy markers (use enemy offsets for sub-tile accuracy)
-                        for en in r.enemies:
-                            if en.alive:
-                                nx = (en.x + 0.5) + (en.offset_x / room.TILE_SIZE)
-                                ny = (en.y + 0.5) + (en.offset_y / room.TILE_SIZE)
-                                ex = rx + int((nx / room.ROOM_TILES) * room_px)
-                                ey = ry + int((ny / room.ROOM_TILES) * room_px)
-                                pygame.draw.circle(overlay, (200,40,40), (ex, ey), max(2, room_px//8))
-                    else:
                         # room exists but is undiscovered: dark subtle square
                         pygame.draw.rect(overlay, (10,10,10), (rx+1, ry+1, room_px-2, room_px-2))
                 else:
-                    # out-of-world / non-existing tile: pure black
+                    # out-of-world: pure black (shouldn't happen as cand lists are clamped but keep safeguard)
                     pygame.draw.rect(overlay, (0,0,0), (rx+1, ry+1, room_px-2, room_px-2))
                 # if this is the player's current room record its pixel origin
                 if (wx, wy) == (room_x, room_y):

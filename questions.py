@@ -1,22 +1,92 @@
-QUESTIONS = [
-    {
-        "q": "What does CPU stand for?",
-        "options": ["Central Processing Unit", "Computer Power Unit", "Core Processing Utility"],
-        "correct": 0
-    },
-    {
-        "q": "Which device connects computers in a LAN?",
-        "options": ["Router", "Switch", "Firewall"],
-        "correct": 1
-    },
-    {
-        "q": "What type of malware pretends to be useful software?",
-        "options": ["Trojan", "Worm", "Spyware"],
-        "correct": 0
-    },
-    {
-        "q": "What does RAM stand for?",
-        "options": ["Random Access Memory", "Read Access Module", "Rapid Action Memory"],
-        "correct": 0
-    },
+# Questions separated by difficulty/curriculum level
+
+QUESTIONS_VG1 = [
+    # Hardware & System
+    {"q": "What is the 'brain' of the computer?", "options": ["CPU", "RAM", "SSD"], "correct": 0},
+    {"q": "Which part stores files when the PC is off?", "options": ["Hard Drive/SSD", "RAM", "CPU"], "correct": 0},
+    {"q": "What does RAM stand for?", "options": ["Random Access Memory", "Read Access Memory", "Run All Memory"], "correct": 0},
+    {"q": "Which is an input device?", "options": ["Mouse", "Monitor", "Speaker"], "correct": 0},
+    {"q": "Which is an output device?", "options": ["Printer", "Keyboard", "Microphone"], "correct": 0},
+    {"q": "What is the main job of an OS?", "options": ["Manage hardware/software", "Browse the web", "Edit photos"], "correct": 0},
+    {"q": "Which is an Operating System?", "options": ["Windows", "Chrome", "Word"], "correct": 0},
+    {"q": "What is a 'bit'?", "options": ["A 0 or a 1", "A byte", "A pixel"], "correct": 0},
+    {"q": "How many bits in a Byte?", "options": ["8", "4", "16"], "correct": 0},
+    {"q": "What connects computers in a LAN?", "options": ["Switch", "Server", "Firewall"], "correct": 0},
+    {"q": "What does LAN stand for?", "options": ["Local Area Network", "Long Area Network", "Live Access Node"], "correct": 0},
+    {"q": "What is a URL?", "options": ["Web address", "Email address", "IP address"], "correct": 0},
+    {"q": "What is Phishing?", "options": ["Fake emails to steal info", "Fishing game", "Testing speed"], "correct": 0},
+    {"q": "What is a strong password?", "options": ["Long and complex", "123456", "Your name"], "correct": 0},
+    {"q": "What is a Virus?", "options": ["Malware that spreads", "Hardware bug", "Dust inside PC"], "correct": 0},
+    {"q": "What does HTML define?", "options": ["Structure of a webpage", "Style of a webpage", "Interactivity"], "correct": 0},
+    {"q": "What is a pixel?", "options": ["Dot on a screen", "Sound unit", "Memory unit"], "correct": 0},
+    {"q": "What is Open Source?", "options": ["Code anyone can see/edit", "Free software only", "Unfinished software"], "correct": 0},
+    {"q": "What is the Cloud?", "options": ["Servers on the internet", "Weather app", "Wireless signal"], "correct": 0},
+    {"q": "What is a Backup?", "options": ["Copy of data", "Reverse gear", "Battery power"], "correct": 0},
+    {"q": "What is a Browser?", "options": ["Program to view websites", "Search engine", "Website host"], "correct": 0},
+    {"q": "What is a Search Engine?", "options": ["Tool to find info online", "Browser", "Database"], "correct": 0},
+    {"q": "What is a Folder?", "options": ["Container for files", "A file type", "A program"], "correct": 0},
+    {"q": "What is a Desktop?", "options": ["Main screen area", "Top of a desk", "A laptop"], "correct": 0},
+    {"q": "What is Wi-Fi?", "options": ["Wireless networking", "Internet cable", "Phone data"], "correct": 0},
 ]
+
+QUESTIONS_VG2 = [
+    # Networking & Security
+    {"q": "What does IP stand for?", "options": ["Internet Protocol", "Internal Port", "Instant Ping"], "correct": 0},
+    {"q": "What does DNS do?", "options": ["Names to IP addresses", "Assigns IPs", "Encrypts data"], "correct": 0},
+    {"q": "What does DHCP do?", "options": ["Assigns IP addresses", "Resolves names", "Blocks viruses"], "correct": 0},
+    {"q": "Which command checks connection?", "options": ["ping", "check", "connect"], "correct": 0},
+    {"q": "What is a Firewall?", "options": ["Traffic filter", "Antivirus", "Physical wall"], "correct": 0},
+    {"q": "What is Encryption?", "options": ["Scrambling data", "Compressing data", "Deleting data"], "correct": 0},
+    {"q": "What is 2FA?", "options": ["Two-Factor Authentication", "Two Fast Actions", "Double Firewall"], "correct": 0},
+    {"q": "What is a VPN?", "options": ["Virtual Private Network", "Visual Public Net", "Verified Port Node"], "correct": 0},
+    {"q": "What is an IP address?", "options": ["Device address on network", "Web page address", "Email ID"], "correct": 0},
+    {"q": "What is a Server?", "options": ["Provider of services/data", "Internet cable", "User computer"], "correct": 0},
+    # Programming / Dev
+    {"q": "What is a Variable?", "options": ["Container for data", "A changing error", "A function"], "correct": 0},
+    {"q": "What is a Loop?", "options": ["Repeating code", "A crash", "A connection"], "correct": 0},
+    {"q": "What is an If-statement?", "options": ["Decision making", "Repeating", "Storing data"], "correct": 0},
+    {"q": "What is CSS used for?", "options": ["Styling", "Structure", "Logic"], "correct": 0},
+    {"q": "What is SQL?", "options": ["Database language", "Web language", "System language"], "correct": 0},
+    {"q": "What is a Bug?", "options": ["Error in code", "Hardware feature", "Virus"], "correct": 0},
+    {"q": "What is an Algorithm?", "options": ["Step-by-step instructions", "A math problem", "A rhythm"], "correct": 0},
+    {"q": "What is a Boolean?", "options": ["True/False", "Text", "Number"], "correct": 0},
+    {"q": "What is an Integer?", "options": ["Whole number", "Decimal number", "Text"], "correct": 0},
+    {"q": "What is a String?", "options": ["Text", "Number", "Thread"], "correct": 0},
+    {"q": "What is a Function?", "options": ["Reusable code block", "A variable", "A loop"], "correct": 0},
+    {"q": "What is an Array/List?", "options": ["Collection of items", "A single number", "A database"], "correct": 0},
+    {"q": "What is Syntax?", "options": ["Grammar of code", "Tax on software", "Logic error"], "correct": 0},
+    {"q": "What is Debugging?", "options": ["Fixing errors", "Creating errors", "Running code"], "correct": 0},
+    {"q": "What is a Database?", "options": ["Organized collection of data", "A large file", "A server"], "correct": 0},
+]
+
+QUESTIONS_HARD = [
+    # Advanced / Concepts
+    {"q": "What is Moore's Law?", "options": ["Transistors double every 2 yrs", "Speed doubles every year", "Price halves every year"], "correct": 0},
+    {"q": "Which OSI layer is Layer 3?", "options": ["Network", "Transport", "Data Link"], "correct": 0},
+    {"q": "What is Port 80 used for?", "options": ["HTTP", "HTTPS", "FTP"], "correct": 0},
+    {"q": "What is Port 443 used for?", "options": ["HTTPS", "HTTP", "SSH"], "correct": 0},
+    {"q": "What is a MAC address?", "options": ["Physical hardware address", "Apple ID", "Temporary IP"], "correct": 0},
+    {"q": "What is DDoS?", "options": ["Distributed Denial of Service", "Direct Data on Server", "Digital Disk OS"], "correct": 0},
+    {"q": "What is RAID?", "options": ["Redundant Array of Indep. Disks", "Rapid Access ID", "Remote Access"], "correct": 0},
+    {"q": "What is Virtualization?", "options": ["Running virtual machines", "VR Gaming", "Fake internet"], "correct": 0},
+    {"q": "What is a Subnet Mask?", "options": ["Defines network/host portion", "Hides IP address", "Encrypts traffic"], "correct": 0},
+    {"q": "What is Latency?", "options": ["Delay in data transfer", "Speed of transfer", "Amount of data"], "correct": 0},
+    {"q": "What is Packet Loss?", "options": ["Data failing to arrive", "Deleting files", "Slow CPU"], "correct": 0},
+    {"q": "What is Social Engineering?", "options": ["Manipulating people", "Building robots", "Social media coding"], "correct": 0},
+    {"q": "What is Ransomware?", "options": ["Malware demanding payment", "Free software", "Stolen hardware"], "correct": 0},
+    {"q": "What is a Zero-day exploit?", "options": ["Unknown vulnerability attack", "First day virus", "No damage attack"], "correct": 0},
+    {"q": "What is Hashing?", "options": ["One-way data mapping", "Encryption", "Compression"], "correct": 0},
+    {"q": "What is Blockchain?", "options": ["Distributed ledger", "Block game", "Chain of emails"], "correct": 0},
+    {"q": "What is IoT?", "options": ["Internet of Things", "Input of Text", "Internal OS Tool"], "correct": 0},
+    {"q": "What is Big Data?", "options": ["Massive datasets", "Large file", "Cloud storage"], "correct": 0},
+    {"q": "What is Machine Learning?", "options": ["Systems learning from data", "Robots walking", "Coding manually"], "correct": 0},
+    {"q": "What is a Logic Gate?", "options": ["Digital circuit block", "Fence", "Login screen"], "correct": 0},
+    {"q": "What is a Transistor?", "options": ["Electronic switch/amplifier", "Radio part", "Power source"], "correct": 0},
+    {"q": "What is TCP?", "options": ["Reliable connection protocol", "Fast unreliable protocol", "Email protocol"], "correct": 0},
+    {"q": "What is UDP?", "options": ["Fast connectionless protocol", "Reliable protocol", "File transfer"], "correct": 0},
+    {"q": "What is SSH?", "options": ["Secure Shell", "Secure Socket Host", "Simple Shell"], "correct": 0},
+    {"q": "What is a Rootkit?", "options": ["Malware hiding deep in OS", "Admin tool", "Gardening app"], "correct": 0},
+]
+
+# Default export for backward compatibility if needed, though we will change usage
+QUESTIONS = QUESTIONS_VG1 + QUESTIONS_VG2 + QUESTIONS_HARD

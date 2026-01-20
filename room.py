@@ -21,8 +21,10 @@ class Room:
         self.enemies = enemies if enemies else []
         # loot boxes: list of (tx, ty, item_dict)
         self.loot_boxes = []
-        # chests: list of InventoryGrid instances placed at tile coords
-        self.chests = []  # list of dicts: {'x':tx, 'y':ty, 'grid': InventoryGrid}
+        # chests: list of dicts: {'x':tx, 'y':ty, 'grid': InventoryGrid}
+        self.chests = []
+        self.is_exit = False
+        self.exit_coords = (4, 4) # Center by default
 
     def _generate_walls(self):
         walls = set()
@@ -89,6 +91,18 @@ class Room:
             elif door == "R":
                 pygame.draw.rect(screen, (100, 200, 100),
                                  ((size - 1) * TILE_SIZE, mid * TILE_SIZE, TILE_SIZE, TILE_SIZE))
+
+        # Draw exit if present
+        if self.is_exit:
+            ex, ey = self.exit_coords
+            # Draw a blue portal/ladder
+            pygame.draw.rect(screen, (0, 100, 255), (ex * TILE_SIZE + 10, ey * TILE_SIZE + 10, TILE_SIZE - 20, TILE_SIZE - 20))
+            pygame.draw.rect(screen, (100, 200, 255), (ex * TILE_SIZE + 20, ey * TILE_SIZE + 20, TILE_SIZE - 40, TILE_SIZE - 40))
+            # Draw "EXIT" text above it
+            font = pygame.font.SysFont(None, 24)
+            text = font.render("EXIT", True, (255, 255, 255))
+            text_rect = text.get_rect(center=(ex * TILE_SIZE + TILE_SIZE // 2, ey * TILE_SIZE - 10))
+            screen.blit(text, text_rect)
 
         # Draw enemies
         for e in self.enemies:
