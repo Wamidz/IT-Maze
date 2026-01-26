@@ -25,6 +25,8 @@ class Room:
         self.chests = []
         self.is_exit = False
         self.exit_coords = (4, 4) # Center by default
+        self._wall_cache = None  # Cache for computed walls
+        self._wall_rects_cache = None  # Cache for wall rects
 
     def _generate_walls(self):
         walls = set()
@@ -52,17 +54,22 @@ class Room:
 
     @property
     def walls(self):
-        # Compute on access to reflect current door state
-        return self._generate_walls()
+        # Return cached walls or compute if not cached
+        if self._wall_cache is None:
+            self._wall_cache = self._generate_walls()
+        return self._wall_cache
 
     def get_wall_rects(self):
         """Return a list of pygame.Rect in pixel coordinates representing wall tiles.
         This lets collision be tested in pixel space so walls scale physically with TILE_SIZE.
+        Results are cached for performance.
         """
-        rects = []
-        for x, y in self.walls:
-            rects.append(pygame.Rect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE))
-        return rects
+        if self._wall_rects_cache is None:
+            rects = []
+            for x, y in self.walls:
+                rects.append(pygame.Rect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE))
+            self._wall_rects_cache = rects
+        return self._wall_rects_cache
 
     def draw(self, screen):
         screen.fill((30, 30, 30))
@@ -135,3 +142,9 @@ class Room:
             if c['x'] == tx and c['y'] == ty:
                 return c['grid']
         return None
+
+    def invalidate_cache(self):
+        """Invalidate wall cache when room configuration changes."""
+        self._wall_cache = None
+        self._wall_rects_cache = None
+

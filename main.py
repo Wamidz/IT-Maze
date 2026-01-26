@@ -1,10 +1,27 @@
 # python
-import pygame, sys
-from player import Player
-from world import generate_maze_with_room_types
-import room
 import copy
 import random
+import sys
+
+import pygame
+
+import room
+from player import Player
+from world import generate_maze_with_room_types
+
+# Text rendering cache to avoid expensive font.render() calls
+_text_cache = {}
+def get_cached_text(text, color=(200, 200, 200)):
+    """Cache text renders to avoid re-rendering the same text every frame."""
+    key = (text, color)
+    if key not in _text_cache:
+        _text_cache[key] = font.render(text, True, color)
+    return _text_cache[key]
+
+def clear_text_cache():
+    """Clear the text cache (call when font changes or memory is needed)."""
+    global _text_cache
+    _text_cache.clear()
 
 pygame.init()
 pygame.display.init()
@@ -82,6 +99,15 @@ room_y = 0
 current_enemy = None
 selected = 0
 
+# Minimap optimization - cache discovered rooms to avoid recalculating every frame
+minimap_discovery_cache = None
+minimap_cache_valid = False
+
+# Debug performance tracking (press F3 to toggle display)
+DEBUG_MODE = False
+frame_times = []  # Rolling window of frame times for FPS calculation
+debug_text_cache_size = 0  # Monitor cache size
+
 # Combat state variables
 combat_turn = "player" # "player" or "enemy"
 combat_action = "menu" # "menu", "attack_minigame", "defend_minigame", "question"
@@ -90,6 +116,8 @@ combat_player_pos = [0, 0] # For minigames
 combat_projectiles = [] # List of projectiles in minigame
 combat_score = 0
 combat_question_answered = False
+combat_question_feedback = None  # "correct" or "incorrect"
+combat_question_feedback_timer = 0
 
 # World & minimap configuration
 WORLD_W = 21
@@ -125,6 +153,10 @@ dragging_item = None  # dict of item being dragged
 drag_source = None  # 'player' or 'chest'
 drag_origin = None  # original (grid, x, y) for restore
 drag_mouse_offset = (0, 0)
+
+# Item tooltip state
+hovered_item = None  # current item being hovered
+hovered_item_pos = (0, 0)  # position to draw tooltip
 
 def clamp_big_map_pan():
     global big_map_pan_x, big_map_pan_y
@@ -263,7 +295,7 @@ def menu_items_for_state(cur_state):
         items = [("New Game", 100, 150), ("Title Screen", 100, 200), ("Exit", 100, 250)]
     elif cur_state == STATE_COMBAT:
         if combat_action == "menu":
-            items = [("Attack", 100, 350), ("Answer Question", 100, 400)]
+            items = [("Attack", 100, 350), ("Item", 100, 390), ("Answer Question", 100, 430)]
         elif combat_action == "question":
             for i, opt in enumerate(current_enemy.data["options"]):
                 items.append((opt, 60, 100 + i*40))
@@ -363,8 +395,44 @@ def apply_graphics_options():
 
 def draw_text(text, x, y, selected=False):
     color = (255, 255, 0) if selected else (200, 200, 200)
-    t = font.render(text, True, color)
+    t = get_cached_text(text, color)
     canvas.blit(t, (x, y))
+
+
+def draw_item_tooltip(item, x, y):
+    """Draw a tooltip showing item information at the given coordinates."""
+    if item is None:
+        return
+
+    item_name = item.get('name', 'Item') if isinstance(item, dict) else getattr(item, 'name', 'Item')
+    item_desc = item.get('description', '') if isinstance(item, dict) else getattr(item, 'description', '')
+    item_type = item.get('type', '') if isinstance(item, dict) else getattr(item, 'type', '')
+
+    # Build tooltip text
+    tooltip_lines = [item_name]
+    if item_type:
+        tooltip_lines.append(f"Type: {item_type}")
+    if item_desc:
+        tooltip_lines.append(item_desc)
+
+    # Calculate tooltip dimensions
+    tooltip_height = len(tooltip_lines) * 20 + 10
+    max_line_width = max([len(line) for line in tooltip_lines]) * 8
+    tooltip_width = max_line_width + 10
+
+    # Ensure tooltip stays on screen
+    cw, ch = canvas.get_size()
+    draw_x = min(x, cw - tooltip_width - 5)
+    draw_y = min(y, ch - tooltip_height - 5)
+
+    # Draw tooltip background
+    pygame.draw.rect(canvas, (40, 40, 50), (draw_x, draw_y, tooltip_width, tooltip_height))
+    pygame.draw.rect(canvas, (150, 150, 180), (draw_x, draw_y, tooltip_width, tooltip_height), 2)
+
+    # Draw tooltip text
+    for i, line in enumerate(tooltip_lines):
+        t = font.render(line, True, (200, 200, 220))
+        canvas.blit(t, (draw_x + 5, draw_y + 5 + i * 20))
 
 
 def draw_question(enemy):
@@ -487,24 +555,35 @@ def handle_attack_hit():
     global combat_score, current_enemy, combat_turn, combat_action, selected, minimap_discovered, state, combat_question_answered
     
     # Calculate damage based on how close to center (200)
+    # Regular attacks are nerfed to incentivize question usage
     dist = abs(combat_score - 200)
     damage = 0
     if dist < 20:
-        damage = 20 # Crit
+        damage = 12  # Crit (was 20)
     elif dist < 50:
-        damage = 10
+        damage = 6   # Normal (was 10)
     else:
-        damage = 5
-        
+        damage = 3   # Weak (was 5)
+
     # Bonus if question was answered correctly previously
     if combat_question_answered:
-        damage *= 2
-        
+        damage = int(damage * 1.5)  # 1.5x multiplier (was 2x)
+        combat_question_answered = False  # Use up the bonus
+
+    # Apply attack multiplier buff
+    damage = int(damage * player.attack_multiplier)
+
+    # Reset attack buff after use
+    player.attack_multiplier = 1.0
+
     current_enemy.apply_damage(damage)
     
     if not current_enemy.alive:
         minimap_discovered.add((room_x, room_y))
         state = STATE_OVERWORLD
+        # Reset combat buffs
+        player.attack_multiplier = 1.0
+        player.defense_multiplier = 1.0
     else:
         start_defend_minigame()
 
@@ -553,6 +632,8 @@ def inventory_panel_layout(cw, gy, gx):
 
 def draw_inventory_panel(cw, gy, gx):
     """Draw player inventory grid in left gutter."""
+    global hovered_item, hovered_item_pos
+
     panel_x, panel_y, slot_size, slot_gap = inventory_panel_layout(cw, gy, gx)
     cols = player.inventory.width
     rows = player.inventory.height
@@ -576,7 +657,12 @@ def draw_inventory_panel(cw, gy, gx):
             ry = sy + y * (slot_size + slot_gap)
             pygame.draw.rect(canvas, (40,40,50), (rx, ry, slot_size, slot_size))
             pygame.draw.rect(canvas, (100,100,100), (rx, ry, slot_size, slot_size), 1)
-    # draw items
+
+    # draw items and check for hover
+    mx, my = get_canvas_mouse_pos()
+    hovered_item = None
+    hovered_item_pos = (0, 0)
+
     for item, ix, iy, iw, ih in player.inventory.iter_items():
         rx = sx + ix * (slot_size + slot_gap)
         ry = sy + iy * (slot_size + slot_gap)
@@ -586,6 +672,12 @@ def draw_inventory_panel(cw, gy, gx):
         name = item.get('name') if isinstance(item, dict) else getattr(item, 'name', str(item))
         txt = font.render(name[:10], True, (20,20,20))
         canvas.blit(txt, (rx+4, ry+4))
+
+        # Check if mouse is hovering over this item
+        item_rect = pygame.Rect(rx, ry, w_px, h_px)
+        if item_rect.collidepoint(mx, my):
+            hovered_item = item
+            hovered_item_pos = (rx + w_px + 5, ry)
 
 def chest_modal_layout(cw, ch, grid):
     cols = grid.width
@@ -599,6 +691,8 @@ def chest_modal_layout(cw, ch, grid):
     return mx, my, slot_size, slot_gap
 
 def draw_chest_modal(grid):
+    global hovered_item, hovered_item_pos
+
     cw, ch = canvas.get_size()
     mx, my, slot_size, slot_gap = chest_modal_layout(cw, ch, grid)
     # modal background
@@ -615,7 +709,12 @@ def draw_chest_modal(grid):
             ry = sy + y * (slot_size + slot_gap)
             pygame.draw.rect(canvas, (40,40,50), (rx, ry, slot_size, slot_size))
             pygame.draw.rect(canvas, (120,120,120), (rx, ry, slot_size, slot_size), 1)
-    # draw items
+
+    # draw items and check for hover
+    cursor_x, cursor_y = get_canvas_mouse_pos()
+    hovered_item = None
+    hovered_item_pos = (0, 0)
+
     for item, ix, iy, iw, ih in grid.iter_items():
         rx = sx + ix * (slot_size + slot_gap)
         ry = sy + iy * (slot_size + slot_gap)
@@ -625,6 +724,13 @@ def draw_chest_modal(grid):
         name = item.get('name') if isinstance(item, dict) else getattr(item, 'name', str(item))
         txt = font.render(name[:12], True, (20,20,20))
         canvas.blit(txt, (rx+4, ry+4))
+
+        # Check if mouse is hovering over this item
+        item_rect = pygame.Rect(rx, ry, w_px, h_px)
+        if item_rect.collidepoint(cursor_x, cursor_y):
+            hovered_item = item
+            hovered_item_pos = (rx + w_px + 5, ry)
+
     return (sx, sy, slot_size, slot_gap, mx, my)
 
 def screen_to_player_grid(mx, my, gx, gy):
@@ -674,6 +780,51 @@ def handle_inventory_click(mx, my, gx, gy):
 # ensure initial application of graphics options (setup canvas & screen)
 apply_graphics_options()
 
+def draw_debug_info():
+    """Draw performance debug information on screen. Press F3 to toggle."""
+    global frame_times, debug_text_cache_size
+
+    if not DEBUG_MODE:
+        return
+
+    # Calculate FPS
+    current_time = pygame.time.get_ticks()
+    if len(frame_times) > 0:
+        elapsed = current_time - frame_times[-1]
+        if elapsed > 0:
+            frame_times.append(current_time)
+        else:
+            return
+    else:
+        frame_times.append(current_time)
+
+    # Keep only last 60 frames for rolling FPS
+    if len(frame_times) > 60:
+        frame_times = frame_times[-60:]
+
+    if len(frame_times) > 1:
+        avg_frame_time = (frame_times[-1] - frame_times[0]) / (len(frame_times) - 1)
+        fps = 1000 / avg_frame_time if avg_frame_time > 0 else 0
+    else:
+        fps = 0
+
+    # Get cache size
+    cache_size = len(_text_cache)
+
+    # Draw debug text
+    debug_texts = [
+        f"FPS: {fps:.1f}",
+        f"Text Cache: {cache_size}",
+        f"State: {state}",
+        "Press F3 to hide debug"
+    ]
+
+    y_offset = 10
+    for debug_text in debug_texts:
+        surf = get_cached_text(debug_text, (100, 255, 100))
+        canvas.blit(surf, (10, y_offset))
+        y_offset += 25
+
 # Start main loop
 while True:
     for event in pygame.event.get():
@@ -705,20 +856,9 @@ while True:
                     big_map_pan_y = -(room_y * BIGMAP_BASE)
 
         if big_map_visible and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            # check recenter button (canvas-space)
-            mx, my = get_canvas_mouse_pos()
-            cw, ch = canvas.get_size()
-            rec_w, rec_h = 110, 30
-            rec_x = cw - rec_w - 10
-            rec_y = 10
-            recenter_button_rect = pygame.Rect(rec_x, rec_y, rec_w, rec_h)
-            if recenter_button_rect.collidepoint(mx, my):
-                # recenter map on player
-                recenter_big_map_on_player()
-            else:
-                # begin dragging big map (use canvas-space coords so scaling doesn't break dragging)
-                big_map_dragging = True
-                big_map_last_mouse = get_canvas_mouse_pos()
+            # begin dragging big map (use canvas-space coords so scaling doesn't break dragging)
+            big_map_dragging = True
+            big_map_last_mouse = get_canvas_mouse_pos()
 
         if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
             # finish drag/drop if active
@@ -1036,7 +1176,10 @@ while True:
                         if combat_action == "menu":
                             if selected == 0: # Attack
                                 start_attack_minigame()
-                            elif selected == 1: # Question
+                            elif selected == 1: # Item
+                                combat_action = "item_select"
+                                selected = 0
+                            elif selected == 2: # Question
                                 combat_action = "question"
                                 selected = 0
                         elif combat_action == "question":
@@ -1324,14 +1467,63 @@ while True:
         # COMBAT
         elif state == STATE_COMBAT and event.type == pygame.KEYDOWN:
             if combat_action == "menu":
-                if event.key == pygame.K_UP or event.key == pygame.K_DOWN:
-                    selected = 1 - selected
+                if event.key == pygame.K_UP:
+                    selected = (selected - 1) % 3
+                elif event.key == pygame.K_DOWN:
+                    selected = (selected + 1) % 3
                 elif event.key == pygame.K_RETURN:
                     if selected == 0: # Attack
                         start_attack_minigame()
-                    elif selected == 1: # Question
+                    elif selected == 1: # Item
+                        combat_action = "item_select"
+                        selected = 0
+                    elif selected == 2: # Question
                         combat_action = "question"
                         selected = 0
+            elif combat_action == "item_select":
+                # Get consumable items
+                consumable_items = []
+                for item, ix, iy, iw, ih in player.inventory.iter_items():
+                    if isinstance(item, dict):
+                        item_type = item.get('type', '')
+                        if item_type in ['heal', 'buff_attack', 'buff_defense', 'stun']:
+                            consumable_items.append((item, ix, iy))
+
+                max_options = len(consumable_items[:5]) + 1  # items + back
+                if event.key == pygame.K_UP:
+                    selected = (selected - 1) % max_options
+                elif event.key == pygame.K_DOWN:
+                    selected = (selected + 1) % max_options
+                elif event.key == pygame.K_RETURN:
+                    if selected < len(consumable_items[:5]):
+                        # Use the selected item
+                        item, ix, iy = consumable_items[selected]
+                        item_type = item.get('type', '')
+                        item_value = item.get('value', 0)
+
+                        # Apply item effect
+                        if item_type == 'heal':
+                            player.hp = min(player.max_hp, player.hp + item_value)
+                        elif item_type == 'buff_attack':
+                            player.attack_multiplier = item_value
+                        elif item_type == 'buff_defense':
+                            player.defense_multiplier = item_value
+                        elif item_type == 'stun':
+                            if current_enemy:
+                                current_enemy.stunned = True
+
+                        # Remove item from inventory
+                        player.remove_item_from_inventory_at(ix, iy)
+
+                        # Enemy's turn (defend minigame)
+                        start_defend_minigame()
+                    else:
+                        # Back to menu
+                        combat_action = "menu"
+                        selected = 0
+                elif event.key == pygame.K_ESCAPE:
+                    combat_action = "menu"
+                    selected = 0
             elif combat_action == "question":
                 if event.key == pygame.K_UP:
                     selected = (selected - 1) % len(current_enemy.data["options"])
@@ -1339,10 +1531,22 @@ while True:
                     selected = (selected + 1) % len(current_enemy.data["options"])
                 elif event.key == pygame.K_RETURN:
                     if selected == current_enemy.data["correct"]:
-                        combat_question_answered = True
-                        start_defend_minigame()
+                        # Correct answer: HIGH REWARD - deal significant damage
+                        combat_question_feedback = "correct"
+                        combat_question_feedback_timer = 120  # 2 seconds at 60fps
+                        damage = 35  # Increased from 25 - much better than regular attack
+                        current_enemy.apply_damage(damage)
+                        if not current_enemy.alive:
+                            minimap_discovered.add((room_x, room_y))
+                            state = STATE_OVERWORLD
+                        else:
+                            combat_question_answered = True
+                            start_defend_minigame()
                     else:
-                        player.apply_damage(10)
+                        # Wrong answer: HIGH RISK - player takes significant damage
+                        combat_question_feedback = "incorrect"
+                        combat_question_feedback_timer = 120  # 2 seconds at 60fps
+                        player.apply_damage(15)  # Increased from 10 - makes wrong answers costly
                         if player.hp <= 0:
                             state = STATE_GAMEOVER
                             selected = 0
@@ -1381,9 +1585,21 @@ while True:
                 selected = 0
 
     keys = handle_keys()
-
-    # draw to internal canvas
+    # Update combat feedback timer
+    if combat_question_feedback_timer > 0:
+        combat_question_feedback_timer -= 1
+    else:
+        combat_question_feedback = None
     canvas.fill((0,0,0))
+    # ensure an overlay surface exists each frame sized to the internal canvas
+    # so code that draws on `overlay` (big map / modals) has a valid target.
+    try:
+        overlay = pygame.Surface(canvas.get_size(), pygame.SRCALPHA)
+        # start fully transparent
+        overlay.fill((0,0,0,0))
+    except Exception:
+        # If canvas isn't ready for some reason, fallback to a tiny surface to avoid NameError
+        overlay = pygame.Surface((1,1))
 
     # DRAW
     if state == STATE_TITLE:
@@ -1630,69 +1846,242 @@ while True:
                                 ex = cell_x + en.x * mini_tile + mini_tile // 2
                                 ey = cell_y + en.y * mini_tile + mini_tile // 2
                                 pygame.draw.circle(canvas, (200,40,40), (ex, ey), max(1, mini_tile//2))
+
+                        # exit (if present in this room)
+                        if r.is_exit:
+                            ex, ey = r.exit_coords
+                            exit_x = cell_x + ex * mini_tile + mini_tile // 2
+                            exit_y = cell_y + ey * mini_tile + mini_tile // 2
+                            # Draw exit as a bright square
+                            pygame.draw.rect(canvas, (0, 200, 200), (exit_x - mini_tile//2, exit_y - mini_tile//2, mini_tile, mini_tile))
+                            pygame.draw.rect(canvas, (0, 255, 255), (exit_x - mini_tile//2, exit_y - mini_tile//2, mini_tile, mini_tile), 1)
                     else:
                         # room exists but is undiscovered: dark subtle square
-                        pygame.draw.rect(overlay, (10,10,10), (rx+1, ry+1, room_px-2, room_px-2))
+                        pygame.draw.rect(canvas, (10,10,10), (cell_x+1, cell_y+1, MINIMAP_TILE-2, MINIMAP_TILE-2))
                 else:
                     # out-of-world: pure black (shouldn't happen as cand lists are clamped but keep safeguard)
-                    pygame.draw.rect(overlay, (0,0,0), (rx+1, ry+1, room_px-2, room_px-2))
+                    pygame.draw.rect(canvas, (0,0,0), (cell_x+1, cell_y+1, MINIMAP_TILE-2, MINIMAP_TILE-2))
                 # if this is the player's current room record its pixel origin
                 if (wx, wy) == (room_x, room_y):
-                    player_room_rx = rx
-                    player_room_ry = ry
+                    player_room_rx = cell_x
+                    player_room_ry = cell_y
 
-        # draw player marker (if world exists) using recorded player's room pixel origin when available
-        if world is not None:
-            # normalized in-room position (tile center + offset)
+        # Draw player marker on minimap
+        if world is not None and player_room_rx is not None and player_room_ry is not None:
+            # Use MINIMAP_TILE size for minimap player marker
+            mini_tile = max(1, MINIMAP_TILE // room.ROOM_TILES)
             in_x = (player.x + 0.5) + (player.offset_x / max(1, room.TILE_SIZE))
             in_y = (player.y + 0.5) + (player.offset_y / max(1, room.TILE_SIZE))
-            # convert to pixels within the room cell
+            sub_px_x = int((in_x / room.ROOM_TILES) * MINIMAP_TILE)
+            sub_px_y = int((in_y / room.ROOM_TILES) * MINIMAP_TILE)
+            prx = player_room_rx + sub_px_x
+            pry = player_room_ry + sub_px_y
+            pygame.draw.circle(canvas, (0, 0, 0), (prx, pry), max(3, mini_tile//2 + 1))
+            pygame.draw.circle(canvas, (160, 220, 160), (prx, pry), max(2, mini_tile//2))
+
+        # Draw BIG MAP overlay if visible
+        if big_map_visible and world is not None:
+            # Clear overlay and draw semi-transparent background
+            overlay.fill((0, 0, 0, 200))
+
+            # Get canvas dimensions
+            cw, ch = canvas.get_size()
+
+            # Calculate room size in pixels based on zoom
+            room_px = int(BIGMAP_BASE * big_map_zoom)
+            ox = big_map_pan_x
+            oy = big_map_pan_y
+
+            # Draw all discovered rooms
+            for (wx, wy) in minimap_discovered:
+                if (wx, wy) not in world:
+                    continue
+
+                r = world.get((wx, wy))
+                # Calculate screen position
+                screen_x = ox + (wx * room_px)
+                screen_y = oy + (wy * room_px)
+
+                # Only draw if on screen
+                if screen_x + room_px < 0 or screen_x > cw or screen_y + room_px < 0 or screen_y > ch:
+                    continue
+
+                # Draw room background
+                pygame.draw.rect(overlay, (40, 40, 40), (screen_x, screen_y, room_px, room_px))
+
+                # Draw internal tiles
+                mini_tile = max(1, room_px // room.ROOM_TILES)
+                for tx in range(room.ROOM_TILES):
+                    for ty in range(room.ROOM_TILES):
+                        px_x = screen_x + tx * mini_tile
+                        px_y = screen_y + ty * mini_tile
+                        if (tx, ty) in r.walls:
+                            col = (80, 80, 80)
+                        else:
+                            col = (120, 120, 120)
+                        pygame.draw.rect(overlay, col, (px_x, px_y, mini_tile, mini_tile))
+
+                # Draw doors
+                mid = room.ROOM_TILES // 2
+                door_thickness = max(1, mini_tile)
+                for door in r.doors:
+                    if door == 'U':
+                        dx = screen_x + mid * mini_tile
+                        dy = screen_y
+                        pygame.draw.rect(overlay, (200, 200, 80), (dx, dy, mini_tile, door_thickness))
+                    elif door == 'D':
+                        dx = screen_x + mid * mini_tile
+                        dy = screen_y + (room.ROOM_TILES-1) * mini_tile + (mini_tile - door_thickness)
+                        pygame.draw.rect(overlay, (200, 200, 80), (dx, dy, mini_tile, door_thickness))
+                    elif door == 'L':
+                        dx = screen_x
+                        dy = screen_y + mid * mini_tile
+                        pygame.draw.rect(overlay, (200, 200, 80), (dx, dy, door_thickness, mini_tile))
+                    elif door == 'R':
+                        dx = screen_x + (room.ROOM_TILES-1) * mini_tile + (mini_tile - door_thickness)
+                        dy = screen_y + mid * mini_tile
+                        pygame.draw.rect(overlay, (200, 200, 80), (dx, dy, door_thickness, mini_tile))
+
+                # Draw enemies
+                for en in r.enemies:
+                    if en.alive:
+                        ex = screen_x + (en.x + 0.5) * mini_tile
+                        ey = screen_y + (en.y + 0.5) * mini_tile
+                        pygame.draw.circle(overlay, (220, 60, 60), (int(ex), int(ey)), max(2, mini_tile//2))
+
+                # Draw exit (if present in this room)
+                if r.is_exit:
+                    ex, ey = r.exit_coords
+                    exit_x = screen_x + (ex + 0.5) * mini_tile
+                    exit_y = screen_y + (ey + 0.5) * mini_tile
+                    # Draw exit as a bright cyan square
+                    pygame.draw.rect(overlay, (0, 200, 200), (int(exit_x - mini_tile//2), int(exit_y - mini_tile//2), mini_tile, mini_tile))
+                    pygame.draw.rect(overlay, (0, 255, 255), (int(exit_x - mini_tile//2), int(exit_y - mini_tile//2), mini_tile, mini_tile), 1)
+
+            # Draw player marker on big map
+            in_x = (player.x + 0.5) + (player.offset_x / max(1, room.TILE_SIZE))
+            in_y = (player.y + 0.5) + (player.offset_y / max(1, room.TILE_SIZE))
             sub_px_x = int((in_x / room.ROOM_TILES) * room_px)
             sub_px_y = int((in_y / room.ROOM_TILES) * room_px)
-            # Prefer using the pixel origin captured while drawing rooms to avoid any math drift
-            if player_room_rx is not None and player_room_ry is not None:
-                prx = player_room_rx + sub_px_x
-                pry = player_room_ry + sub_px_y
-            else:
-                # fallback to computed world coordinates
-                prx = ox + (room_x * room_px) + sub_px_x
-                pry = oy + (room_y * room_px) + sub_px_y
+            player_screen_x = ox + (room_x * room_px) + sub_px_x
+            player_screen_y = oy + (room_y * room_px) + sub_px_y
 
-            # Only recenter automatically right after the map is opened. If the user is
-            # panning/dragging the map we should not override their pan.
-            cw, ch = canvas.get_size()
+            # Auto-recenter if just opened and player off-screen
             if big_map_just_opened:
-                if prx < 0 or prx >= cw or pry < 0 or pry >= ch:
-                    # compute player's world position in pixels
+                if player_screen_x < 0 or player_screen_x >= cw or player_screen_y < 0 or player_screen_y >= ch:
                     prx_world = (room_x * room_px) + sub_px_x
                     pry_world = (room_y * room_px) + sub_px_y
                     big_map_pan_x = cw//2 - prx_world
                     big_map_pan_y = ch//2 - pry_world
-                    clamp_big_map_pan()
                     ox = big_map_pan_x
                     oy = big_map_pan_y
-                    prx = ox + prx_world
-                    pry = oy + pry_world
-                # clear the just-opened flag so we don't keep recentering
+                    player_screen_x = ox + prx_world
+                    player_screen_y = oy + pry_world
                 big_map_just_opened = False
 
-            # dark outline circle to hide any red artifacts from underlying graphics
+            # Draw player
             outline_thickness = max(1, room_px // 16)
-            pygame.draw.circle(overlay, (0, 0, 0), (prx, pry), max(4, room_px//6 + outline_thickness))
-            pygame.draw.circle(overlay, (160, 220, 160), (prx, pry), max(4, room_px//6))
+            pygame.draw.circle(overlay, (0, 0, 0), (player_screen_x, player_screen_y), max(5, room_px//6 + outline_thickness))
+            pygame.draw.circle(overlay, (160, 255, 160), (player_screen_x, player_screen_y), max(4, room_px//6))
 
-        # draw recenter button
-        pygame.draw.rect(overlay, (60,60,60), recenter_button_rect)
-        pygame.draw.rect(overlay, (180,180,180), recenter_button_rect, 2)
-        bt = font.render("Recenter", True, (220,220,220))
-        overlay.blit(bt, (rec_x + 10, rec_y + (rec_h - bt.get_height())//2))
+            # Draw hint text
+            hint = font.render("Big Map - Drag to pan, mouse wheel to zoom, press M to close", True, (220, 220, 220))
+            overlay.blit(hint, (10, ch - 30))
 
-        # hint text
-        hint = font.render("Big Map - drag to pan, mouse wheel to zoom, press M to close", True, (220,220,220))
-        overlay.blit(hint, (10, canvas.get_height() - 30))
+            # Blit overlay onto canvas
+            canvas.blit(overlay, (0, 0))
 
-        # blit overlay onto canvas
-        canvas.blit(overlay, (0,0))
+    elif state == STATE_COMBAT:
+        # Draw combat screen
+        canvas.fill((20, 20, 30))
+
+        # Draw enemy
+        cw, ch = canvas.get_size()
+        ex, ey = cw // 2, ch // 4
+        pygame.draw.circle(canvas, (200, 50, 50), (ex, ey), 40)
+
+        # Enemy HP bar
+        if current_enemy:
+            hp_pct = current_enemy.hp / current_enemy.max_hp
+            pygame.draw.rect(canvas, (100, 0, 0), (ex - 50, ey + 50, 100, 10))
+            pygame.draw.rect(canvas, (0, 200, 0), (ex - 50, ey + 50, int(100 * hp_pct), 10))
+            enemy_name = current_enemy.__class__.__name__
+            draw_text(f"{enemy_name}", ex - 40, ey - 60)
+
+        # Player HP
+        draw_text(f"HP: {player.hp}/{player.max_hp}", 20, ch - 50)
+
+        if combat_action == "menu":
+            draw_text("What will you do?", cw // 2 - 80, ch // 2 - 50)
+            draw_text("Attack", 100, ch // 2, selected == 0)
+            draw_text("Item", 100, ch // 2 + 40, selected == 1)
+            draw_text("Answer Question (HIGH RISK/REWARD)", 100, ch // 2 + 80, selected == 2)
+        elif combat_action == "item_select":
+            draw_text("Select Item to Use:", 100, ch // 2 - 80)
+            # Draw player's consumable items
+            consumable_items = []
+            for item, ix, iy, iw, ih in player.inventory.iter_items():
+                if isinstance(item, dict):
+                    item_type = item.get('type', '')
+                    if item_type in ['heal', 'buff_attack', 'buff_defense', 'stun']:
+                        consumable_items.append((item, ix, iy))
+
+            if consumable_items:
+                for idx, (item, ix, iy) in enumerate(consumable_items[:5]):  # Show max 5 items
+                    item_name = item.get('name', 'Item')
+                    item_desc = item.get('description', '')
+                    draw_text(f"{item_name} - {item_desc}", 100, ch // 2 - 30 + idx * 35, selected == idx)
+                draw_text("Back", 100, ch // 2 - 30 + len(consumable_items[:5]) * 35, selected == len(consumable_items[:5]))
+            else:
+                draw_text("No consumable items!", 100, ch // 2 - 30)
+                draw_text("Back", 100, ch // 2 + 10, selected == 0)
+        elif combat_action == "attack_minigame":
+            update_attack_minigame(keys)
+            draw_attack_minigame()
+        elif combat_action == "defend_minigame":
+            update_defend_minigame(keys)
+            draw_defend_minigame()
+        elif combat_action == "question":
+            if current_enemy and current_enemy.data:
+                q_text = current_enemy.data.get("q", "Question?")
+                draw_text(q_text, 50, ch // 2 - 80)
+                options = current_enemy.data.get("options", [])
+                for i, opt in enumerate(options):
+                    draw_text(opt, 70, ch // 2 - 30 + i * 35, selected == i)
+
+                # Draw feedback if available
+                if combat_question_feedback:
+                    if combat_question_feedback == "correct":
+                        draw_text("CORRECT! +35 Damage! (HIGH REWARD!)", cw // 2 - 150, 50, True)
+                    elif combat_question_feedback == "incorrect":
+                        draw_text("WRONG! -15 Health! (HIGH RISK!)", cw // 2 - 150, 50, True)
+
+    elif state == STATE_PAUSE:
+        draw_text("PAUSED", cw // 2 - 50 if 'cw' in dir() else 100, 100)
+        draw_text("Title Screen", 100, 150, selected == 0)
+        draw_text("Exit", 100, 200, selected == 1)
+
+    elif state == STATE_GAMEOVER:
+        cw, ch = canvas.get_size()
+        draw_text("GAME OVER", cw // 2 - 80, ch // 2 - 60)
+        draw_text("Try Again", 100, ch // 2, selected == 0)
+        draw_text("Title Screen", 100, ch // 2 + 40, selected == 1)
+        draw_text("Exit", 100, ch // 2 + 80, selected == 2)
+
+    elif state == STATE_WIN:
+        cw, ch = canvas.get_size()
+        draw_text("YOU WIN!", cw // 2 - 60, ch // 2 - 60)
+        draw_text("New Game", 100, ch // 2, selected == 0)
+        draw_text("Title Screen", 100, ch // 2 + 40, selected == 1)
+        draw_text("Exit", 100, ch // 2 + 80, selected == 2)
+
+    elif state == STATE_CHEAT:
+        draw_text("CHEAT MENU", 100, 50)
+        draw_text(f"Noclip: {'ON' if player.noclip else 'OFF'}", 100, 150, selected == 0)
+        draw_text(f"Godmode: {'ON' if player.godmode else 'OFF'}", 100, 200, selected == 1)
+        draw_text("Reveal Map", 100, 250, selected == 2)
+        draw_text("Show Exit", 100, 300, selected == 3)
+        draw_text("Back", 100, 350, selected == 4)
 
     # Draw chest modal if open (on top of gameplay)
     if state == STATE_OVERWORLD and chest_open and chest_grid is not None:
@@ -1708,6 +2097,10 @@ while True:
         # simple square preview
         pygame.draw.rect(canvas, (200,200,120), (mx-16, my-16, 32, 32))
 
+    # Draw item tooltip if hovering over an item
+    if hovered_item is not None and state == STATE_OVERWORLD:
+        draw_item_tooltip(hovered_item, hovered_item_pos[0], hovered_item_pos[1])
+
     # scale/blit canvas to actual display surface
     try:
         scaled = pygame.transform.scale(canvas, screen.get_size())
@@ -1716,6 +2109,7 @@ while True:
         # fallback: if scaling fails, try blitting without scaling
         screen.blit(canvas, (0,0))
 
+    draw_debug_info()  # Draw debug info last
     pygame.display.flip()
     clock.tick(60)
 
